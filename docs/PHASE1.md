@@ -20,14 +20,14 @@
 | 变量 | `Load(addr)`, `Store(addr)` |
 | 函数 | `Call(idx)`, `Return`, `Halt` |
 
-### 1.3 虚拟机核心
+### 1.3 虚拟机核心 ✅
 
 - `VM` 结构：操作数栈、调用帧栈、指令指针
 - `CallFrame`：函数引用、返回地址、局部变量数组
 - 主循环：fetch -> decode -> execute，用 Rust match 做指令分发
 - 代码存储：`Vec<Function>`，用索引引用函数
 
-### 1.4 函数模型
+### 1.4 函数模型 ✅
 
 - `Function` 结构：名称、参数数量、字节码块、局部变量数量
 - `Call`：压入新帧，初始化局部变量为 `Null`
