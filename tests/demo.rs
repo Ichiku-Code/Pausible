@@ -313,3 +313,104 @@ fn yield_snapshot_resume_roundtrip() {
     assert_eq!(vm3.stack, &[Value::Int(1)]);
 }
 
+#[test]
+fn resume_from_file_roundtrip() {
+    use pausible::snapshot::Snapshot;
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    let code = vec![
+        OpCode::Push(Value::Int(10)),
+        OpCode::Push(Value::Int(20)),
+        OpCode::Yield,
+        OpCode::Push(Value::Int(30)),
+        OpCode::Halt,
+    ];
+
+    // Execute to yield point
+    let mut vm = VM::new();
+    let main = Function::new("main", 0, code.clone(), 0);
+    vm.add_function(main);
+    vm.prepare(0).unwrap();
+
+    vm.step().unwrap(); // push 10
+    vm.step().unwrap(); // push 20
+    vm.step().unwrap(); // yield → pause
+    assert!(!vm.running);
+    assert_eq!(vm.stack, &[Value::Int(10), Value::Int(20)]);
+
+    // Save snapshot to file
+    let snap = vm.create_snapshot();
+    let path = "/tmp/pausible_demo_snapshot.bin";
+    snap.write_to_file(path).unwrap();
+
+    // Load snapshot from file and resume
+    let loaded = Snapshot::read_from_file(path).unwrap();
+    let err = vm.resume(&loaded);
+    assert!(err.is_ok(), "resume from file should succeed");
+
+    // After resume, run continued until Halt
+    assert!(!vm.running);
+    assert_eq!(vm.stack, &[Value::Int(10), Value::Int(20), Value::Int(30)]);
+}
+
+#[test]
+fn resume_with_string_heap_objects() {
+    use pausible::snapshot::Snapshot;
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    // Simple: push a heap string, yield, then push another and halt
+    let main = Function::new(
+        "main",
+        0,
+        vec![
+            OpCode::Push(Value::Int(0)),   // placeholder, replaced below
+            OpCode::Yield,
+            OpCode::Push(Value::Int(0)),   // placeholder
+            OpCode::Halt,
+        ],
+        0,
+    );
+
+    let mut vm = VM::new();
+    vm.add_function(main);
+
+    let hello_gc = vm.alloc_string("Hello".into());
+    let world_gc = vm.alloc_string("World".into());
+
+    vm.prepare(0).unwrap();
+
+    vm.step().unwrap(); // Push(Int(0)) → IP=1
+    vm.step().unwrap(); // Yield → pause, IP=2
+
+    assert!(!vm.running);
+
+    // Replace stack values with heap strings
+    vm.stack[0] = Value::String(hello_gc);
+    vm.stack.push(Value::String(world_gc));
+
+    // Snapshot at yield point
+    let snap = vm.create_snapshot();
+    let path = "/tmp/pausible_string_heap.bin";
+    snap.write_to_file(path).unwrap();
+
+    // Resume from file
+    let loaded = Snapshot::read_from_file(path).unwrap();
+    let err = vm.resume(&loaded);
+    assert!(err.is_ok(), "resume should succeed");
+
+    assert!(!vm.running);
+    // Stack should still have our heap strings + new values from post-yield
+    assert!(vm.stack.len() >= 2, "stack should have heap strings");
+    if let Value::String(gc) = &vm.stack[0] {
+        assert_eq!(vm.heap.get(*gc).unwrap().data, "Hello");
+    } else {
+        panic!("expected String");
+    }
+}
+

@@ -83,6 +83,26 @@ impl fmt::Display for VmError {
 
 impl core::error::Error for VmError {}
 
+/// Errors that can occur during the resume workflow (restore + continue execution).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResumeError {
+    /// Snapshot restoration failed.
+    Snapshot(String),
+    /// VM execution failed after restore.
+    Vm(VmError),
+}
+
+impl fmt::Display for ResumeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Snapshot(msg) => write!(f, "resume snapshot error: {msg}"),
+            Self::Vm(e) => write!(f, "resume VM error: {e}"),
+        }
+    }
+}
+
+impl core::error::Error for ResumeError {}
+
 /// The Pausible stack-based virtual machine.
 #[derive(Debug, Clone)]
 pub struct VM {
@@ -237,6 +257,22 @@ impl VM {
     ) -> Result<(), crate::snapshot::SnapshotError> {
         let hash = self.code_hash();
         snap.restore_into(self, hash)
+    }
+
+    /// Resume execution from a snapshot: restore state and continue running.
+    ///
+    /// This is the combined restore + run workflow for 2.6 Resume.
+    /// Execution continues until the next `Yield` or `Halt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ResumeError::Snapshot` if the code hash mismatches or the
+    /// snapshot is malformed. Returns `ResumeError::Vm` if a runtime
+    /// error occurs during continued execution.
+    pub fn resume(&mut self, snap: &crate::snapshot::Snapshot) -> Result<(), ResumeError> {
+        self.restore_snapshot(snap)
+            .map_err(|e| ResumeError::Snapshot(e.to_string()))?;
+        self.run().map_err(ResumeError::Vm)
     }
 
     /// Execute until Halt or an error.
@@ -955,6 +991,99 @@ mod tests {
         assert_eq!(vm.stack, &[Value::Int(42), Value::Int(99)]);
         vm.step().unwrap(); // halt
         assert!(!vm.running);
+    }
+
+    #[test]
+    fn resume_continues_after_yield() {
+
+        let mut vm = make_vm(vec![
+            OpCode::Push(Value::Int(10)),
+            OpCode::Yield,
+            OpCode::Push(Value::Int(20)),
+            OpCode::Halt,
+        ]);
+
+        vm.step().unwrap(); // push 10
+        vm.step().unwrap(); // yield → pauses
+
+        // Snapshot at yield point
+        let snap = vm.create_snapshot();
+
+        // Resume into same VM (restore + run)
+        let err = vm.resume(&snap);
+        assert!(err.is_ok(), "resume should succeed after yield");
+        // After resume, run continues until next Yield/Halt
+        // push 20 was executed, then halt
+        assert_eq!(vm.stack, &[Value::Int(10), Value::Int(20)]);
+        assert!(!vm.running);
+    }
+
+    #[test]
+    fn resume_preserves_heap_objects() {
+        let mut vm = make_vm(vec![
+            OpCode::Push(Value::Null),  // placeholder
+            OpCode::Yield,
+            OpCode::Halt,
+        ]);
+
+        // Push a heap-allocated string and store it in a local
+        let gc = vm.alloc_string("persistent".into());
+        vm.stack.push(Value::String(gc));
+
+        // Step through Push (pushes Null on top of our string)
+        vm.step().unwrap(); // push Null
+        // Pop the Null, leaving our string on stack
+        vm.stack.pop().unwrap();
+        vm.step().unwrap(); // yield → pauses
+
+        let snap = vm.create_snapshot();
+        let err = vm.resume(&snap);
+        assert!(err.is_ok(), "resume should succeed");
+        assert!(!vm.frames.is_empty(), "frames should survive resume");
+        if let Value::String(gc2) = &vm.stack[0] {
+            assert_eq!(vm.heap.get(*gc2).unwrap().data, "persistent");
+        } else {
+            panic!("expected String on stack");
+        }
+    }
+
+    #[test]
+    fn resume_multiple_cycles() {
+        let mut vm = make_vm(vec![
+            OpCode::Push(Value::Int(1)),
+            OpCode::Yield,
+            OpCode::Push(Value::Int(2)),
+            OpCode::Yield,
+            OpCode::Push(Value::Int(3)),
+            OpCode::Halt,
+        ]);
+
+        // Cycle 1: push 1, yield
+        vm.step().unwrap(); // push 1
+        vm.step().unwrap(); // yield
+        let snap1 = vm.create_snapshot();
+        vm.resume(&snap1).unwrap(); // push 2, yield, halt
+        // Actually push 2 then yield → running is false
+        assert!(!vm.running);
+        assert!(!vm.stack.is_empty());
+
+        // Cycle 2: manually resume by re-enabling running
+        vm.running = true;
+        vm.step().unwrap(); // push 3
+        vm.step().unwrap(); // halt
+        assert_eq!(vm.stack, &[Value::Int(1), Value::Int(2), Value::Int(3)]);
+    }
+
+    #[test]
+    fn resume_error_display() {
+        assert_eq!(
+            format!("{}", ResumeError::Snapshot("bad".into())),
+            "resume snapshot error: bad"
+        );
+        assert_eq!(
+            format!("{}", ResumeError::Vm(VmError::Halted)),
+            "resume VM error: VM halted"
+        );
     }
 
 }

@@ -36,12 +36,14 @@
 - ✅ VM 执行流程：GC 扫描 → 序列化快照 → 写入文件 → 终止运行
 - ✅ 无 I/O、无并发：yield 点只能出现在纯计算任务中
 
-### 2.6 恢复 (Resume)
+### 2.6 恢复 (Resume) ✅
 
-- 从 snapshot 文件加载 VM 状态
-- 重建堆：反序列化所有堆对象
-- 重建调用栈：恢复所有 `CallFrame`，`ip` 指向 yield 的下一条指令
-- 重建函数表：用 `code_hash` 校验字节码版本一致性
+- ✅ 从 snapshot 文件加载 VM 状态（`Snapshot::read_from_file`）
+- ✅ 重建堆：反序列化所有堆对象（`restore_into` 重建 heap + pos→Gc 映射）
+- ✅ 重建调用栈：恢复所有 `CallFrame`，`ip` 指向 yield 的下一条指令
+- ✅ 重建函数表：用 `code_hash` 校验字节码版本一致性
+- ✅ `VM::resume`：恢复 + 继续执行的顶层工作流方法
+- ✅ `ResumeError`：统一 snapshot 恢复和 VM 执行错误
 
 ### 2.7 跨架构验证与测试
 
