@@ -51,6 +51,16 @@ trait Serializable {
 
 I/O 句柄类型：`File`, `TcpStream`, `HttpConnection`, `Timer`
 
+
+### Value 枚举的变体设计
+
+`Value` 是一个 tagged union（Rust `enum`），设计原则是：
+
+- **高频内置类型作为独立变体**：`Int`、`Float`、`Bool`、`Null`、`String`、`List` 等频繁操作的类型各自拥有独立变体。编译器对此生成高效的跳转表，指令分发时 `match` 直接内联。
+- **低频/用户自定义类型统一走单变体**：未来的 `Map`、`Set` 等低频内置类型，以及 Phase 5 编译器支持用户定义 `struct` 后产生的用户自定义类型，统一放入 `Object(Gc<UserObj>)` 变体。`UserObj` 内部用字段表（如 `HashMap<String, Value>`）存储成员，运行时类型分发通过动态查找完成。
+
+这样在保持高频路径性能的同时，扩展新类型时不需要修改 `Value` 枚举本身（仅扩展 `UserObj` 的内容），避免了变体爆炸。
+
 ### 2.3 I/O 系统——分类与重建
 
 这是整个设计中最需要精细化的部分。Pausible 把 I/O 分为三类，各有不同的恢复策略：

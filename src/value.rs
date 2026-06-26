@@ -5,139 +5,113 @@
 
 use core::fmt;
 
+use crate::heap::{Gc, ListObj, StringObj};
+
 /// Runtime value in the Pausible VM.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
     Null,
+    /// Heap-allocated UTF-8 string (identity semantics for equality).
+    String(Gc<StringObj>),
+    /// Heap-allocated dynamic list (identity semantics for equality).
+    List(Gc<ListObj>),
+}
+
+// Manual PartialEq: String/List compare by Gc handle identity.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Int(l), Self::Int(r)) => l == r,
+            (Self::Float(l), Self::Float(r)) => l == r,
+            (Self::Bool(l), Self::Bool(r)) => l == r,
+            (Self::Null, Self::Null) => true,
+            (Self::String(l), Self::String(r)) => l == r,
+            (Self::List(l), Self::List(r)) => l == r,
+            _ => false,
+        }
+    }
 }
 
 impl Value {
-    // -- type predicates --
-
     #[must_use]
-    pub fn is_int(&self) -> bool {
-        matches!(self, Self::Int(_))
-    }
-
+    pub fn is_int(&self) -> bool { matches!(self, Self::Int(_)) }
     #[must_use]
-    pub fn is_float(&self) -> bool {
-        matches!(self, Self::Float(_))
-    }
-
+    pub fn is_float(&self) -> bool { matches!(self, Self::Float(_)) }
     #[must_use]
-    pub fn is_bool(&self) -> bool {
-        matches!(self, Self::Bool(_))
-    }
-
+    pub fn is_bool(&self) -> bool { matches!(self, Self::Bool(_)) }
     #[must_use]
-    pub fn is_null(&self) -> bool {
-        matches!(self, Self::Null)
-    }
-
-    // -- conversions --
+    pub fn is_null(&self) -> bool { matches!(self, Self::Null) }
+    #[must_use]
+    pub fn is_string(&self) -> bool { matches!(self, Self::String(_)) }
+    #[must_use]
+    pub fn is_list(&self) -> bool { matches!(self, Self::List(_)) }
 
     #[must_use]
     pub fn as_int(&self) -> Option<i64> {
-        match self {
-            Self::Int(v) => Some(*v),
-            _ => None,
-        }
+        match self { Self::Int(v) => Some(*v), _ => None }
     }
-
     #[must_use]
     pub fn as_float(&self) -> Option<f64> {
-        match self {
-            Self::Float(v) => Some(*v),
-            _ => None,
-        }
+        match self { Self::Float(v) => Some(*v), _ => None }
     }
-
     #[must_use]
     pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            Self::Bool(v) => Some(*v),
-            _ => None,
-        }
+        match self { Self::Bool(v) => Some(*v), _ => None }
     }
-
-    // -- arithmetic --
+    #[must_use]
+    pub fn as_string(&self) -> Option<Gc<StringObj>> {
+        match self { Self::String(v) => Some(*v), _ => None }
+    }
+    #[must_use]
+    pub fn as_list(&self) -> Option<Gc<ListObj>> {
+        match self { Self::List(v) => Some(*v), _ => None }
+    }
 
     pub fn add(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l + r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l + r)),
-            _ => Err(TypeError {
-                op: "add",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "add", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn sub(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l - r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l - r)),
-            _ => Err(TypeError {
-                op: "sub",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "sub", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn mul(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l * r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l * r)),
-            _ => Err(TypeError {
-                op: "mul",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "mul", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn div(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l / r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l / r)),
-            _ => Err(TypeError {
-                op: "div",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "div", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn modulo(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l % r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l % r)),
-            _ => Err(TypeError {
-                op: "mod",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "mod", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn neg(&self) -> Result<Self, TypeError> {
         match self {
             Self::Int(v) => Ok(Self::Int(-v)),
             Self::Float(v) => Ok(Self::Float(-v)),
-            other => Err(TypeError {
-                op: "neg",
-                lhs: other.clone(),
-                rhs: Value::Null,
-            }),
+            other => Err(TypeError { op: "neg", lhs: other.clone(), rhs: Value::Null }),
         }
     }
-
-    // -- comparison --
 
     pub fn eq(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
@@ -145,108 +119,70 @@ impl Value {
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l == r)),
             (Self::Bool(l), Self::Bool(r)) => Ok(Self::Bool(l == r)),
             (Self::Null, Self::Null) => Ok(Self::Bool(true)),
-            _ => Err(TypeError {
-                op: "eq",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            (Self::String(l), Self::String(r)) => Ok(Self::Bool(l == r)),
+            (Self::List(l), Self::List(r)) => Ok(Self::Bool(l == r)),
+            _ => Err(TypeError { op: "eq", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn neq(&self, rhs: &Self) -> Result<Self, TypeError> {
         self.eq(rhs).map(|v| Self::Bool(!v.as_bool().unwrap_or(true)))
     }
-
     pub fn lt(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l < r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l < r)),
-            _ => Err(TypeError {
-                op: "lt",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "lt", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn lte(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l <= r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l <= r)),
-            _ => Err(TypeError {
-                op: "lte",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "lte", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn gt(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l > r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l > r)),
-            _ => Err(TypeError {
-                op: "gt",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "gt", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn gte(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l >= r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l >= r)),
-            _ => Err(TypeError {
-                op: "gte",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "gte", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
-    // -- logical --
 
     pub fn and(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Bool(l), Self::Bool(r)) => Ok(Self::Bool(*l && *r)),
-            _ => Err(TypeError {
-                op: "and",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "and", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn or(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Bool(l), Self::Bool(r)) => Ok(Self::Bool(*l || *r)),
-            _ => Err(TypeError {
-                op: "or",
-                lhs: self.clone(),
-                rhs: rhs.clone(),
-            }),
+            _ => Err(TypeError { op: "or", lhs: self.clone(), rhs: rhs.clone() }),
         }
     }
-
     pub fn not(&self) -> Result<Self, TypeError> {
         match self {
             Self::Bool(v) => Ok(Self::Bool(!v)),
-            other => Err(TypeError {
-                op: "not",
-                lhs: other.clone(),
-                rhs: Value::Null,
-            }),
+            other => Err(TypeError { op: "not", lhs: other.clone(), rhs: Value::Null }),
         }
     }
 
-    /// Returns truthy (non-zero, non-null, true).
+    /// Returns truthy (non-zero, non-null, true); heap refs are always truthy.
     #[must_use]
     pub fn is_truthy(&self) -> bool {
         match self {
             Self::Int(v) => *v != 0,
             Self::Float(v) => *v != 0.0,
             Self::Bool(v) => *v,
+            Self::String(_) | Self::List(_) => true,
             Self::Null => false,
         }
     }
@@ -259,6 +195,8 @@ impl fmt::Display for Value {
             Self::Float(v) => write!(f, "{v}"),
             Self::Bool(v) => write!(f, "{v}"),
             Self::Null => write!(f, "null"),
+            Self::String(gc) => write!(f, "<string@{}>", gc.index),
+            Self::List(gc) => write!(f, "<list@{}>", gc.index),
         }
     }
 }
@@ -273,11 +211,7 @@ pub struct TypeError {
 
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "type error: cannot {} {} and {}",
-            self.op, self.lhs, self.rhs
-        )
+        write!(f, "type error: cannot {} {} and {}", self.op, self.lhs, self.rhs)
     }
 }
 
@@ -286,8 +220,86 @@ impl core::error::Error for TypeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heap::Heap;
 
-    // -- type predicates --
+    fn heap_with_str(s: &str) -> (Heap, Gc<StringObj>) {
+        let mut heap = Heap::new();
+        let gc = heap.alloc_string(s.into());
+        (heap, gc)
+    }
+
+    fn heap_with_list(vals: Vec<Value>) -> (Heap, Gc<ListObj>) {
+        let mut heap = Heap::new();
+        let gc = heap.alloc_list(vals);
+        (heap, gc)
+    }
+
+    #[test]
+    fn string_is_string() {
+        let (_heap, gc) = heap_with_str("hello");
+        assert!(Value::String(gc).is_string());
+        assert!(!Value::String(gc).is_int());
+    }
+
+    #[test]
+    fn list_is_list() {
+        let (_heap, gc) = heap_with_list(vec![]);
+        assert!(Value::List(gc).is_list());
+        assert!(!Value::List(gc).is_float());
+    }
+
+    #[test]
+    fn as_string_conversion() {
+        let (_heap, gc) = heap_with_str("hi");
+        let val = Value::String(gc);
+        assert_eq!(val.as_string(), Some(gc));
+        assert_eq!(Value::Int(1).as_string(), None);
+    }
+
+    #[test]
+    fn as_list_conversion() {
+        let (_heap, gc) = heap_with_list(vec![]);
+        let val = Value::List(gc);
+        assert_eq!(val.as_list(), Some(gc));
+        assert_eq!(Value::Null.as_list(), None);
+    }
+
+    #[test]
+    fn string_eq_by_identity() {
+        let mut heap = Heap::new();
+        let a = heap.alloc_string("abc".into());
+        let b = heap.alloc_string("abc".into());
+        assert_eq!(Value::String(a).eq(&Value::String(a)), Ok(Value::Bool(true)));
+        assert_eq!(Value::String(a).eq(&Value::String(b)), Ok(Value::Bool(false)));
+    }
+
+    #[test]
+    fn list_eq_by_identity() {
+        let mut heap = Heap::new();
+        let a = heap.alloc_list(vec![Value::Int(1)]);
+        let b = heap.alloc_list(vec![Value::Int(1)]);
+        assert_eq!(Value::List(a).eq(&Value::List(a)), Ok(Value::Bool(true)));
+        assert_eq!(Value::List(a).eq(&Value::List(b)), Ok(Value::Bool(false)));
+    }
+
+    #[test]
+    fn heap_types_always_truthy() {
+        let (_heap, str_gc) = heap_with_str("");
+        let (_heap, list_gc) = heap_with_list(vec![]);
+        assert!(Value::String(str_gc).is_truthy());
+        assert!(Value::List(list_gc).is_truthy());
+    }
+
+    #[test]
+    fn display_heap_types() {
+        let mut heap = Heap::new();
+        let str_gc = heap.alloc_string("hello".into());
+        let list_gc = heap.alloc_list(vec![]);
+        assert_eq!(format!("{}", Value::String(str_gc)), "<string@0>");
+        assert_eq!(format!("{}", Value::List(list_gc)), "<list@1>");
+    }
+
+    // -- original value tests (Int, Float, Bool, Null) --
 
     #[test]
     fn int_is_int() {
@@ -315,8 +327,6 @@ mod tests {
         assert!(!Value::Null.is_int());
     }
 
-    // -- conversions --
-
     #[test]
     fn as_int_conversion() {
         assert_eq!(Value::Int(7).as_int(), Some(7));
@@ -335,8 +345,6 @@ mod tests {
         assert_eq!(Value::Bool(true).as_bool(), Some(true));
         assert_eq!(Value::Int(1).as_bool(), None);
     }
-
-    // -- arithmetic --
 
     #[test]
     fn int_add() {
@@ -396,8 +404,6 @@ mod tests {
         assert!(Value::Bool(true).neg().is_err());
     }
 
-    // -- comparison --
-
     #[test]
     fn eq_comparison() {
         assert_eq!(Value::Int(1).eq(&Value::Int(1)), Ok(Value::Bool(true)));
@@ -425,8 +431,6 @@ mod tests {
         assert!(Value::Bool(true).gt(&Value::Bool(false)).is_err());
     }
 
-    // -- logical --
-
     #[test]
     fn logical_and_or_not() {
         assert_eq!(
@@ -449,10 +453,8 @@ mod tests {
         assert_eq!(Value::Bool(false).not(), Ok(Value::Bool(true)));
     }
 
-    // -- truthy --
-
     #[test]
-    fn truthy() {
+    fn truthy_basic() {
         assert!(Value::Int(1).is_truthy());
         assert!(!Value::Int(0).is_truthy());
         assert!(Value::Float(0.1).is_truthy());
@@ -462,10 +464,8 @@ mod tests {
         assert!(!Value::Null.is_truthy());
     }
 
-    // -- display --
-
     #[test]
-    fn display() {
+    fn display_basic() {
         assert_eq!(format!("{}", Value::Int(42)), "42");
         assert_eq!(format!("{}", Value::Float(3.14)), "3.14");
         assert_eq!(format!("{}", Value::Bool(true)), "true");

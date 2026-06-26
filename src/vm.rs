@@ -6,7 +6,23 @@ use core::fmt;
 
 use crate::function::Function;
 use crate::opcode::OpCode;
+use crate::heap::{Heap, Gc, ListObj, StringObj};
 use crate::value::{TypeError, Value};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeapError {
+    InvalidHandle,
+}
+
+impl core::fmt::Display for HeapError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidHandle => write!(f, "invalid heap handle"),
+        }
+    }
+}
+
+impl core::error::Error for HeapError {}
 
 /// A call frame tracks execution state for one function invocation.
 #[derive(Debug, Clone)]
@@ -44,6 +60,8 @@ pub enum VmError {
     LocalOutOfBounds(usize),
     /// A typed operation received incompatible operands.
     TypeError(TypeError),
+    /// A heap operation failed (e.g. accessing freed memory).
+    HeapError(HeapError),
     /// Execution has stopped (Halt reached).
     Halted,
 }
@@ -57,6 +75,7 @@ impl fmt::Display for VmError {
             Self::InvalidIp => write!(f, "instruction pointer out of bounds"),
             Self::LocalOutOfBounds(idx) => write!(f, "local {idx} out of bounds"),
             Self::TypeError(e) => write!(f, "{e}"),
+            Self::HeapError(e) => write!(f, "{e}"),
             Self::Halted => write!(f, "VM halted"),
         }
     }
@@ -75,6 +94,8 @@ pub struct VM {
     pub functions: Vec<Function>,
     /// Whether the VM is currently executing.
     pub running: bool,
+    /// Heap for reference types (String, List, etc.).
+    pub heap: Heap,
 }
 
 impl Default for VM {
@@ -90,8 +111,39 @@ impl VM {
             stack: Vec::new(),
             frames: Vec::new(),
             functions: Vec::new(),
+            heap: Heap::new(),
             running: false,
         }
+    }
+
+    /// Allocate a string on the heap.
+    pub fn alloc_string(&mut self, data: String) -> Gc<StringObj> {
+        self.heap.alloc_string(data)
+    }
+
+    /// Allocate a list on the heap.
+    pub fn alloc_list(&mut self, elements: Vec<Value>) -> Gc<ListObj> {
+        self.heap.alloc_list(elements)
+    }
+
+    /// Borrow a heap string by handle.
+    pub fn get_string(&self, gc: Gc<StringObj>) -> Result<&StringObj, VmError> {
+        self.heap.get(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+    }
+
+    /// Mutably borrow a heap string.
+    pub fn get_string_mut(&mut self, gc: Gc<StringObj>) -> Result<&mut StringObj, VmError> {
+        self.heap.get_mut(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+    }
+
+    /// Borrow a heap list by handle.
+    pub fn get_list(&self, gc: Gc<ListObj>) -> Result<&ListObj, VmError> {
+        self.heap.get(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+    }
+
+    /// Mutably borrow a heap list.
+    pub fn get_list_mut(&mut self, gc: Gc<ListObj>) -> Result<&mut ListObj, VmError> {
+        self.heap.get_mut(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
     }
 
     /// Register a function and return its index.

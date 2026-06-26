@@ -4,6 +4,7 @@
 
 use core::fmt;
 
+use crate::heap::Heap;
 use crate::function::Function;
 use crate::opcode::OpCode;
 use crate::value::Value;
@@ -123,6 +124,8 @@ mod val_tag {
     pub const FLOAT: u8 = 0x01;
     pub const BOOL: u8 = 0x02;
     pub const NULL: u8 = 0x03;
+    pub const STRING: u8 = 0x04;
+    pub const LIST: u8 = 0x05;
 }
 
 /// Serialization / deserialization errors.
@@ -133,6 +136,7 @@ pub enum SerError {
     UnexpectedEof,
     UnknownOpcode(u8),
     UnknownValueTag(u8),
+    HeapValueWithoutHeap,
 }
 
 impl fmt::Display for SerError {
@@ -143,6 +147,7 @@ impl fmt::Display for SerError {
             Self::UnexpectedEof => write!(f, "unexpected end of data"),
             Self::UnknownOpcode(b) => write!(f, "unknown opcode byte: {b:#04X}"),
             Self::UnknownValueTag(b) => write!(f, "unknown value tag: {b:#04X}"),
+            Self::HeapValueWithoutHeap => write!(f, "cannot serialize/deserialize a heap-backed Value without a Heap context"),
         }
     }
 }
@@ -155,7 +160,7 @@ fn write_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
 
-fn write_value(buf: &mut Vec<u8>, val: &Value) {
+fn write_value(buf: &mut Vec<u8>, val: &Value, heap: &Heap) {
     match val {
         Value::Int(v) => {
             buf.push(val_tag::INT);
@@ -172,14 +177,28 @@ fn write_value(buf: &mut Vec<u8>, val: &Value) {
         Value::Null => {
             buf.push(val_tag::NULL);
         }
+        Value::String(gc) => {
+            buf.push(val_tag::STRING);
+            let s = heap.get(*gc).expect("valid Gc handle");
+            write_u32(buf, s.data.len() as u32);
+            buf.extend_from_slice(s.data.as_bytes());
+        }
+        Value::List(gc) => {
+            buf.push(val_tag::LIST);
+            let list = heap.get(*gc).expect("valid Gc handle");
+            write_u32(buf, list.elements.len() as u32);
+            for elem in &list.elements {
+                write_value(buf, elem, heap);
+            }
+        }
     }
 }
 
-fn write_opcode(buf: &mut Vec<u8>, op: &OpCode) {
+fn write_opcode(buf: &mut Vec<u8>, op: &OpCode, heap: &Heap) {
     match op {
         OpCode::Push(v) => {
             buf.push(tag::PUSH);
-            write_value(buf, v);
+            write_value(buf, v, heap);
         }
         OpCode::Pop => buf.push(tag::POP),
         OpCode::Dup => buf.push(tag::DUP),
@@ -240,7 +259,7 @@ fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, SerError> {
     Ok(u32::from_le_bytes(bytes))
 }
 
-fn read_value(data: &[u8], pos: &mut usize) -> Result<Value, SerError> {
+fn read_value(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<Value, SerError> {
     let tag = data.get(*pos).ok_or(SerError::UnexpectedEof)?;
     *pos += 1;
     match *tag {
@@ -270,17 +289,35 @@ fn read_value(data: &[u8], pos: &mut usize) -> Result<Value, SerError> {
             Ok(Value::Bool(*b != 0))
         }
         val_tag::NULL => Ok(Value::Null),
+        val_tag::STRING => {
+            let len = read_u32(data, pos)? as usize;
+            let end = pos.checked_add(len).ok_or(SerError::UnexpectedEof)?;
+            let bytes = data.get(*pos..end).ok_or(SerError::UnexpectedEof)?;
+            *pos = end;
+            let s = String::from_utf8_lossy(bytes).into_owned();
+            let gc = heap.alloc_string(s);
+            Ok(Value::String(gc))
+        }
+        val_tag::LIST => {
+            let count = read_u32(data, pos)? as usize;
+            let mut elements = Vec::with_capacity(count);
+            for _ in 0..count {
+                elements.push(read_value(data, pos, heap)?);
+            }
+            let gc = heap.alloc_list(elements);
+            Ok(Value::List(gc))
+        }
         _ => Err(SerError::UnknownValueTag(*tag)),
     }
 }
 
-fn read_opcode(data: &[u8], pos: &mut usize) -> Result<OpCode, SerError> {
+fn read_opcode(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<OpCode, SerError> {
     let tag = data.get(*pos).ok_or(SerError::UnexpectedEof)?;
     *pos += 1;
     match *tag {
         tag::HALT => Ok(OpCode::Halt),
         tag::PUSH => {
-            let val = read_value(data, pos)?;
+            let val = read_value(data, pos, heap)?;
             Ok(OpCode::Push(val))
         }
         tag::POP => Ok(OpCode::Pop),
@@ -333,7 +370,7 @@ fn read_opcode(data: &[u8], pos: &mut usize) -> Result<OpCode, SerError> {
 
 /// Serialize a single function to bytes.
 #[must_use]
-pub fn serialize_function(func: &Function) -> Vec<u8> {
+pub fn serialize_function(func: &Function, heap: &Heap) -> Vec<u8> {
     let mut buf = Vec::new();
 
     write_u32(&mut buf, func.name.len() as u32);
@@ -342,7 +379,7 @@ pub fn serialize_function(func: &Function) -> Vec<u8> {
     write_u32(&mut buf, func.num_locals as u32);
     write_u32(&mut buf, func.code.len() as u32);
     for op in &func.code {
-        write_opcode(&mut buf, op);
+        write_opcode(&mut buf, op, heap);
     }
 
     buf
@@ -353,12 +390,12 @@ pub fn serialize_function(func: &Function) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns `SerError` if the data is malformed.
-pub fn deserialize_function(data: &[u8]) -> Result<Function, SerError> {
-    deserialize_function_counted(data).map(|(f, _)| f)
+pub fn deserialize_function(data: &[u8], heap: &mut Heap) -> Result<Function, SerError> {
+    deserialize_function_counted(data, heap).map(|(f, _)| f)
 }
 
 /// Internal: deserialize a function and return bytes consumed.
-fn deserialize_function_counted(data: &[u8]) -> Result<(Function, usize), SerError> {
+fn deserialize_function_counted(data: &[u8], heap: &mut Heap) -> Result<(Function, usize), SerError> {
     let mut pos = 0;
 
     let name_len = read_u32(data, &mut pos)? as usize;
@@ -372,7 +409,7 @@ fn deserialize_function_counted(data: &[u8]) -> Result<(Function, usize), SerErr
 
     let mut code = Vec::with_capacity(code_len);
     for _ in 0..code_len {
-        code.push(read_opcode(data, &mut pos)?);
+        code.push(read_opcode(data, &mut pos, heap)?);
     }
 
     Ok((Function::new(&name, arity, code, num_locals), pos))
@@ -380,7 +417,7 @@ fn deserialize_function_counted(data: &[u8]) -> Result<(Function, usize), SerErr
 
 /// Serialize a module (list of functions) to bytes with header.
 #[must_use]
-pub fn serialize_module(functions: &[Function]) -> Vec<u8> {
+pub fn serialize_module(functions: &[Function], heap: &Heap) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Header
@@ -392,7 +429,7 @@ pub fn serialize_module(functions: &[Function]) -> Vec<u8> {
 
     // Functions
     for func in functions {
-        let func_bytes = serialize_function(func);
+        let func_bytes = serialize_function(func, heap);
         buf.extend_from_slice(&func_bytes);
     }
 
@@ -404,7 +441,8 @@ pub fn serialize_module(functions: &[Function]) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns `SerError` if the data is malformed or version is unsupported.
-pub fn deserialize_module(data: &[u8]) -> Result<Vec<Function>, SerError> {
+pub fn deserialize_module(data: &[u8]) -> Result<(Vec<Function>, Heap), SerError> {
+    let mut heap = Heap::new();
     let mut pos = 0;
 
     // Header
@@ -427,17 +465,18 @@ pub fn deserialize_module(data: &[u8]) -> Result<Vec<Function>, SerError> {
 
     let mut functions = Vec::with_capacity(num_functions);
     for _ in 0..num_functions {
-        let (func, consumed) = deserialize_function_counted(&data[pos..])?;
+        let (func, consumed) = deserialize_function_counted(&data[pos..], &mut heap)?;
         pos += consumed;
         functions.push(func);
     }
 
-    Ok(functions)
+    Ok((functions, heap))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heap::Heap;
 
     // -- Chunk builder --
 
@@ -490,8 +529,10 @@ mod tests {
             ],
             2,
         );
-        let bytes = serialize_function(&func);
-        let restored = deserialize_function(&bytes).unwrap();
+        let heap = Heap::new();
+        let bytes = serialize_function(&func, &heap);
+        let mut restored_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restored_heap).unwrap();
         assert_eq!(restored.name, "add");
         assert_eq!(restored.arity, 2);
         assert_eq!(restored.num_locals, 2);
@@ -519,8 +560,10 @@ mod tests {
             ],
             1,
         );
-        let bytes = serialize_function(&func);
-        let restored = deserialize_function(&bytes).unwrap();
+        let heap = Heap::new();
+        let bytes = serialize_function(&func, &heap);
+        let mut restored_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restored_heap).unwrap();
         assert_eq!(restored.code, func.code);
     }
 
@@ -539,8 +582,10 @@ mod tests {
             ],
             0,
         );
-        let bytes = serialize_function(&func);
-        let restored = deserialize_function(&bytes).unwrap();
+        let heap = Heap::new();
+        let bytes = serialize_function(&func, &heap);
+        let mut restored_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restored_heap).unwrap();
         assert_eq!(restored.code, func.code);
     }
 
@@ -557,8 +602,9 @@ mod tests {
         );
         let functions = vec![f1.clone(), f2.clone()];
 
-        let bytes = serialize_module(&functions);
-        let restored = deserialize_module(&bytes).unwrap();
+        let heap = Heap::new();
+        let bytes = serialize_module(&functions, &heap);
+        let (restored, _heap) = deserialize_module(&bytes).unwrap();
 
         assert_eq!(restored.len(), 2);
         assert_eq!(restored[0].name, "main");
@@ -571,8 +617,9 @@ mod tests {
         let func = Function::new("entry", 0, vec![OpCode::Halt], 0);
         let functions = vec![func.clone()];
 
-        let bytes = serialize_module(&functions);
-        let restored = deserialize_module(&bytes).unwrap();
+        let heap = Heap::new();
+        let bytes = serialize_module(&functions, &heap);
+        let (restored, _heap) = deserialize_module(&bytes).unwrap();
 
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].name, "entry");
@@ -624,5 +671,131 @@ mod tests {
 
         let err = deserialize_module(&data).unwrap_err();
         assert!(matches!(err, SerError::UnknownOpcode(0xFF)));
+    }
+
+    // -- heap type roundtrip tests --
+
+    #[test]
+    fn function_roundtrip_with_string() {
+        let mut heap = Heap::new();
+        let s = heap.alloc_string("hello world".into());
+        let func = Function::new(
+            "str_test",
+            0,
+            vec![
+                OpCode::Push(Value::String(s)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let bytes = serialize_function(&func, &heap);
+        let mut restore_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restore_heap).unwrap();
+        assert_eq!(restored.code.len(), 2);
+        if let OpCode::Push(Value::String(gc)) = &restored.code[0] {
+            assert_eq!(restore_heap.get(*gc).unwrap().data, "hello world");
+        } else {
+            panic!("expected Push(String)");
+        }
+    }
+
+    #[test]
+    fn function_roundtrip_with_empty_string() {
+        let mut heap = Heap::new();
+        let s = heap.alloc_string(String::new());
+        let func = Function::new(
+            "empty",
+            0,
+            vec![
+                OpCode::Push(Value::String(s)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let bytes = serialize_function(&func, &heap);
+        let mut restore_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restore_heap).unwrap();
+        if let OpCode::Push(Value::String(gc)) = &restored.code[0] {
+            assert_eq!(restore_heap.get(*gc).unwrap().data, "");
+        } else {
+            panic!("expected Push(String)");
+        }
+    }
+
+    #[test]
+    fn function_roundtrip_with_list() {
+        let mut heap = Heap::new();
+        let lst = heap.alloc_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let func = Function::new(
+            "list_test",
+            0,
+            vec![
+                OpCode::Push(Value::List(lst)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let bytes = serialize_function(&func, &heap);
+        let mut restore_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restore_heap).unwrap();
+        if let OpCode::Push(Value::List(gc)) = &restored.code[0] {
+            assert_eq!(restore_heap.get(*gc).unwrap().elements, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        } else {
+            panic!("expected Push(List)");
+        }
+    }
+
+    #[test]
+    fn function_roundtrip_with_nested_list() {
+        let mut heap = Heap::new();
+        let inner = heap.alloc_list(vec![Value::Int(1), Value::Int(2)]);
+        let outer = heap.alloc_list(vec![Value::List(inner), Value::Int(3)]);
+        let func = Function::new(
+            "nested",
+            0,
+            vec![
+                OpCode::Push(Value::List(outer)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let bytes = serialize_function(&func, &heap);
+        let mut restore_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restore_heap).unwrap();
+        if let OpCode::Push(Value::List(gc)) = &restored.code[0] {
+            let outer_list = restore_heap.get(*gc).unwrap();
+            assert_eq!(outer_list.elements.len(), 2);
+            if let Value::List(inner_gc) = &outer_list.elements[0] {
+                assert_eq!(restore_heap.get(*inner_gc).unwrap().elements, vec![Value::Int(1), Value::Int(2)]);
+            } else {
+                panic!("expected nested List");
+            }
+        } else {
+            panic!("expected Push(List)");
+        }
+    }
+
+    #[test]
+    fn module_roundtrip_with_strings() {
+        let mut heap = Heap::new();
+        let s1 = heap.alloc_string("main".into());
+        let s2 = heap.alloc_string("helper".into());
+        let f1 = Function::new("a", 0, vec![OpCode::Push(Value::String(s1)), OpCode::Halt], 0);
+        let f2 = Function::new("b", 0, vec![OpCode::Push(Value::String(s2)), OpCode::Halt], 0);
+
+        let bytes = serialize_module(&[f1.clone(), f2.clone()], &heap);
+        let (restored, restore_heap) = deserialize_module(&bytes).unwrap();
+
+        assert_eq!(restored.len(), 2);
+        if let OpCode::Push(Value::String(gc)) = &restored[0].code[0] {
+            assert_eq!(restore_heap.get(*gc).unwrap().data, "main");
+        } else {
+            panic!("expected Push(String) in f1");
+        }
+        if let OpCode::Push(Value::String(gc)) = &restored[1].code[0] {
+            assert_eq!(restore_heap.get(*gc).unwrap().data, "helper");
+        } else {
+            panic!("expected Push(String) in f2");
+        }
     }
 }
