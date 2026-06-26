@@ -5,3 +5,4 @@ pub mod function;
 pub mod opcode;
 pub mod vm;
 pub mod serialize;
+pub mod snapshot;

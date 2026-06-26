@@ -1,0 +1,890 @@
+// Snapshot binary format uses u32 for counts; heap / frame sizes in
+// practical programs fit comfortably within a 32-bit range.
+#![allow(clippy::cast_possible_truncation)]
+
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::heap::{Heap, HeapObject};
+use crate::value::Value;
+use crate::vm::{CallFrame, VM};
+
+// -- header constants --
+
+const MAGIC: [u8; 4] = *b"PAUS";
+const VERSION: u32 = 1;
+
+// Value type tags (mirrors serialize.rs wire format).
+const TAG_INT: u8 = 0x00;
+const TAG_FLOAT: u8 = 0x01;
+const TAG_BOOL: u8 = 0x02;
+const TAG_NULL: u8 = 0x03;
+const TAG_STRING: u8 = 0x04;
+const TAG_LIST: u8 = 0x05;
+
+// -- errors --
+
+/// Errors that can occur during snapshot write / read / restore.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SnapshotError {
+    /// File magic does not match `"PAUS"`.
+    BadMagic { found: [u8; 4] },
+    /// Snapshot version is not supported by this runtime.
+    UnsupportedVersion(u32),
+    /// Code hash mismatch — bytecode has changed since snapshot was taken.
+    CodeMismatch { expected: u64, found: u64 },
+    /// File I/O error.
+    IoError(String),
+    /// Premature end of file.
+    UnexpectedEof,
+    /// Unknown object tag in heap section.
+    UnknownObjectTag(u8),
+    /// Heap position refers to an object that was never deserialized.
+    InvalidHeapPosition(u32),
+}
+
+impl core::fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BadMagic { found } => write!(f, "bad snapshot magic: {found:02X?}"),
+            Self::UnsupportedVersion(v) => write!(f, "unsupported snapshot version: {v}"),
+            Self::CodeMismatch { expected, found } => {
+                write!(f, "code hash mismatch: expected {expected:016X}, found {found:016X}")
+            }
+            Self::IoError(msg) => write!(f, "snapshot I/O error: {msg}"),
+            Self::UnexpectedEof => write!(f, "unexpected end of snapshot data"),
+            Self::UnknownObjectTag(b) => write!(f, "unknown heap object tag: {b:#04X}"),
+            Self::InvalidHeapPosition(pos) => {
+                write!(f, "invalid heap position reference: {pos}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for SnapshotError {}
+
+// -- Snapshot --
+
+/// A portable, serialized snapshot of the complete VM state.
+///
+/// Contains the heap objects reachable from roots, all call frames,
+/// and the operand stack — everything needed to reconstruct the VM
+/// and resume execution from a yield point.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// Magic + version + metadata.
+    pub header: SnapshotHeader,
+    /// Raw bytes of the serialized heap section.
+    heap_data: Vec<u8>,
+    /// Raw bytes of the serialized frames section.
+    frames_data: Vec<u8>,
+    /// Raw bytes of the serialized stack section.
+    stack_data: Vec<u8>,
+    /// Mapping from original Gc index → position in the heap section
+    /// (populated during capture; the reverse map pos→Gc is built
+    /// during restore from the heap section itself).
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    gc_to_pos: HashMap<usize, u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotHeader {
+    pub magic: [u8; 4],
+    pub version: u32,
+    /// Hash of the serialized function table — must match on restore.
+    pub code_hash: u64,
+    /// Unix timestamp when the snapshot was created.
+    pub timestamp: u64,
+    heap_count: u32,
+    frame_count: u32,
+    stack_count: u32,
+}
+
+impl Snapshot {
+    // -- binary helpers (identical to chunk.rs pattern) --
+
+    fn write_u8(buf: &mut Vec<u8>, b: u8) {
+        buf.push(b);
+    }
+
+    fn write_u32(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn write_u64(buf: &mut Vec<u8>, v: u64) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn read_u8(data: &[u8], pos: &mut usize) -> Result<u8, SnapshotError> {
+        let b = data.get(*pos).ok_or(SnapshotError::UnexpectedEof)?;
+        *pos += 1;
+        Ok(*b)
+    }
+
+    fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32, SnapshotError> {
+        let end = pos.checked_add(4).ok_or(SnapshotError::UnexpectedEof)?;
+        let bytes: [u8; 4] = data
+            .get(*pos..end)
+            .ok_or(SnapshotError::UnexpectedEof)?
+            .try_into()
+            .unwrap();
+        *pos = end;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, SnapshotError> {
+        let end = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
+        let bytes: [u8; 8] = data
+            .get(*pos..end)
+            .ok_or(SnapshotError::UnexpectedEof)?
+            .try_into()
+            .unwrap();
+        *pos = end;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    // -- capture --
+
+    /// Capture the current VM state into a snapshot.
+    ///
+    /// Side-effect: calls `mark_roots` internally to identify reachable
+    /// heap objects. Stack and frame state are unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a `Gc` handle points to a freed slot — this indicates
+    /// a GC bug and should never happen with a healthy VM.
+    pub fn capture(vm: &mut VM, code_hash: u64) -> Self {
+        // 1. Mark all reachable objects from roots.
+        vm.mark_roots();
+
+        // 2. Serialize reachable heap objects, building gc→position map.
+        let mut heap_buf: Vec<u8> = Vec::new();
+        let mut gc_to_pos: HashMap<usize, u32> = HashMap::new();
+        let mut heap_count: u32 = 0;
+
+        for idx in 0..vm.heap.capacity() {
+            if vm.heap.is_marked(idx) {
+                gc_to_pos.insert(idx, heap_count);
+                heap_count += 1;
+
+                let obj = vm.heap.get_object(idx).expect("idx within capacity");
+                Self::serialize_heap_object(&mut heap_buf, obj, &gc_to_pos, &vm.heap);
+            }
+        }
+
+        // 3. Serialize frames (locals reference heap by position).
+        let mut frames_buf: Vec<u8> = Vec::new();
+        Self::write_u32(&mut frames_buf, vm.frames.len() as u32);
+        for frame in &vm.frames {
+            Self::serialize_frame(&mut frames_buf, frame, &gc_to_pos, &vm.heap);
+        }
+
+        // 4. Serialize operand stack.
+        let mut stack_buf: Vec<u8> = Vec::new();
+        Self::write_u32(&mut stack_buf, vm.stack.len() as u32);
+        for val in &vm.stack {
+            Self::write_value_ref(&mut stack_buf, val, &gc_to_pos, &vm.heap);
+        }
+
+        // 5. Assemble header.
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let header = SnapshotHeader {
+            magic: MAGIC,
+            version: VERSION,
+            code_hash,
+            timestamp,
+            heap_count,
+            frame_count: vm.frames.len() as u32,
+            stack_count: vm.stack.len() as u32,
+        };
+
+        Snapshot {
+            header,
+            heap_data: heap_buf,
+            frames_data: frames_buf,
+            stack_data: stack_buf,
+            gc_to_pos,
+        }
+    }
+
+    // -- file I/O --
+
+    /// Write the snapshot to a file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SnapshotError::IoError` if the file cannot be written.
+    pub fn write_to_file(&self, path: &str) -> Result<(), SnapshotError> {
+        let mut buf: Vec<u8> = Vec::new();
+
+        // Header
+        buf.extend_from_slice(&self.header.magic);
+        Self::write_u32(&mut buf, self.header.version);
+        Self::write_u64(&mut buf, self.header.code_hash);
+        Self::write_u64(&mut buf, self.header.timestamp);
+        Self::write_u32(&mut buf, self.header.heap_count);
+        Self::write_u32(&mut buf, self.header.frame_count);
+        Self::write_u32(&mut buf, self.header.stack_count);
+
+        // Sections
+        buf.extend_from_slice(&self.heap_data);
+        buf.extend_from_slice(&self.frames_data);
+        buf.extend_from_slice(&self.stack_data);
+
+        std::fs::write(path, &buf).map_err(|e| SnapshotError::IoError(e.to_string()))
+    }
+
+    /// Read a snapshot from a file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SnapshotError` if the file cannot be read or the data
+    /// is malformed.
+    pub fn read_from_file(path: &str) -> Result<Self, SnapshotError> {
+        let data = std::fs::read(path).map_err(|e| SnapshotError::IoError(e.to_string()))?;
+        Self::read_from_bytes(&data)
+    }
+
+    /// Parse a snapshot from in-memory bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SnapshotError` if the data is malformed.
+    fn read_from_bytes(data: &[u8]) -> Result<Self, SnapshotError> {
+        let mut pos: usize = 0;
+
+        // Header
+        let magic: [u8; 4] = data
+            .get(pos..pos + 4)
+            .and_then(|s| s.try_into().ok())
+            .ok_or(SnapshotError::UnexpectedEof)?;
+        if magic != MAGIC {
+            return Err(SnapshotError::BadMagic { found: magic });
+        }
+        pos += 4;
+
+        let version = Self::read_u32(data, &mut pos)?;
+        if version != VERSION {
+            return Err(SnapshotError::UnsupportedVersion(version));
+        }
+
+        let code_hash = Self::read_u64(data, &mut pos)?;
+        let timestamp = Self::read_u64(data, &mut pos)?;
+        let heap_count = Self::read_u32(data, &mut pos)?;
+        let frame_count = Self::read_u32(data, &mut pos)?;
+        let stack_count = Self::read_u32(data, &mut pos)?;
+
+        // Read heap section: each object is self-describing.
+        let heap_start = pos;
+        for _ in 0..heap_count {
+            Self::skip_heap_object(data, &mut pos)?;
+        }
+        let heap_data = data[heap_start..pos].to_vec();
+
+        // Read frames section: count(u32) then frame entries.
+        let frames_start = pos;
+        let _frame_count_data = Self::read_u32(data, &mut pos)?;
+        for _ in 0..frame_count {
+            Self::skip_frame_entry(data, &mut pos)?;
+        }
+        let frames_data = data[frames_start..pos].to_vec();
+
+        // Read stack section: count(u32) then values.
+        let stack_start = pos;
+        let _stack_count_data = Self::read_u32(data, &mut pos)?;
+        for _ in 0..stack_count {
+            Self::skip_value(data, &mut pos)?;
+        }
+        let stack_data = data[stack_start..pos].to_vec();
+
+        let header = SnapshotHeader {
+            magic,
+            version,
+            code_hash,
+            timestamp,
+            heap_count,
+            frame_count,
+            stack_count,
+        };
+
+        Ok(Snapshot {
+            header,
+            heap_data,
+            frames_data,
+            stack_data,
+            gc_to_pos: HashMap::new(),
+        })
+    }
+
+    // -- skip helpers for section boundary computation --
+
+    /// Skip past a snapshot value (position-reference format) without
+    /// allocating. Used to find section boundaries during deserialization.
+    fn skip_value(data: &[u8], pos: &mut usize) -> Result<(), SnapshotError> {
+        let tag = Self::read_u8(data, pos)?;
+        match tag {
+            TAG_INT | TAG_FLOAT => *pos += 8,
+            TAG_BOOL => *pos += 1,
+            TAG_NULL => {}
+            TAG_STRING | TAG_LIST => {
+                *pos += 4;
+            }
+            _ => return Err(SnapshotError::UnknownObjectTag(tag)),
+        }
+        Ok(())
+    }
+
+    /// Skip past one heap object (inline format with full content).
+    fn skip_heap_object(data: &[u8], pos: &mut usize) -> Result<(), SnapshotError> {
+        let tag = Self::read_u8(data, pos)?;
+        match tag {
+            TAG_STRING => {
+                let len = Self::read_u32(data, pos)? as usize;
+                *pos = pos.checked_add(len).ok_or(SnapshotError::UnexpectedEof)?;
+            }
+            TAG_LIST => {
+                let count = Self::read_u32(data, pos)? as usize;
+                for _ in 0..count {
+                    Self::skip_value(data, pos)?;
+                }
+            }
+            _ => return Err(SnapshotError::UnknownObjectTag(tag)),
+        }
+        Ok(())
+    }
+
+    /// Skip past one frame entry: function(u32) | ip(u32) |
+    /// `locals_count(u32)` | locals values.
+    fn skip_frame_entry(data: &[u8], pos: &mut usize) -> Result<(), SnapshotError> {
+        // function + ip + locals_count = 3 x u32
+        *pos = pos.checked_add(12).ok_or(SnapshotError::UnexpectedEof)?;
+        // Re-read locals_count from the correct offset.
+        let locals_offset = pos.checked_sub(4).ok_or(SnapshotError::UnexpectedEof)?;
+        let locals_count = u32::from_le_bytes(
+            data.get(locals_offset..*pos)
+                .ok_or(SnapshotError::UnexpectedEof)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        for _ in 0..locals_count {
+            Self::skip_value(data, pos)?;
+        }
+        Ok(())
+    }
+
+    // -- restore --
+
+    /// Restore VM state from this snapshot.
+    ///
+    /// Verifies the code hash against the provided value.
+    /// On success the VM's heap, frames, and stack are replaced with
+    /// the reconstructed state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SnapshotError::CodeMismatch` if the code hashes differ.
+    pub fn restore_into(&self, vm: &mut VM, code_hash: u64) -> Result<(), SnapshotError> {
+        if code_hash != self.header.code_hash {
+            return Err(SnapshotError::CodeMismatch {
+                expected: self.header.code_hash,
+                found: code_hash,
+            });
+        }
+
+        // 1. Rebuild heap: read objects, build pos→Gc map.
+        let mut heap = Heap::new();
+        let mut pos_to_gc: HashMap<u32, usize> = HashMap::new();
+        let mut hpos: usize = 0;
+
+        for pos_idx in 0..self.header.heap_count {
+            let tag = Self::read_u8(&self.heap_data, &mut hpos)?;
+            match tag {
+                TAG_STRING => {
+                    let len = Self::read_u32(&self.heap_data, &mut hpos)? as usize;
+                    let end = hpos.checked_add(len).ok_or(SnapshotError::UnexpectedEof)?;
+                    let bytes = self.heap_data.get(hpos..end).ok_or(SnapshotError::UnexpectedEof)?;
+                    hpos = end;
+                    let s = String::from_utf8_lossy(bytes).into_owned();
+                    let gc = heap.alloc_string(s);
+                    pos_to_gc.insert(pos_idx, gc.index);
+                }
+                TAG_LIST => {
+                    let count = Self::read_u32(&self.heap_data, &mut hpos)? as usize;
+                    let mut elements = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        elements.push(Self::read_value_ref(
+                            &self.heap_data,
+                            &mut hpos,
+                            &pos_to_gc,
+                            &mut heap,
+                        )?);
+                    }
+                    let gc = heap.alloc_list(elements);
+                    pos_to_gc.insert(pos_idx, gc.index);
+                }
+                _ => return Err(SnapshotError::UnknownObjectTag(tag)),
+            }
+        }
+
+        // 2. Rebuild frames.
+        let mut fpos: usize = 0;
+        let frame_count = Self::read_u32(&self.frames_data, &mut fpos)?;
+        let mut frames: Vec<CallFrame> = Vec::with_capacity(frame_count as usize);
+
+        for _ in 0..frame_count {
+            let function = Self::read_u32(&self.frames_data, &mut fpos)? as usize;
+            let ip = Self::read_u32(&self.frames_data, &mut fpos)? as usize;
+            let locals_count = Self::read_u32(&self.frames_data, &mut fpos)? as usize;
+            let mut locals = Vec::with_capacity(locals_count);
+            for _ in 0..locals_count {
+                locals.push(Self::read_value_ref(
+                    &self.frames_data,
+                    &mut fpos,
+                    &pos_to_gc,
+                    &mut heap,
+                )?);
+            }
+            frames.push(CallFrame::new(function, locals));
+            // Restore the IP (CallFrame::new sets it to 0).
+            if let Some(frame) = frames.last_mut() {
+                frame.ip = ip;
+            }
+        }
+
+        // 3. Rebuild stack.
+        let mut spos: usize = 0;
+        let stack_count = Self::read_u32(&self.stack_data, &mut spos)?;
+        let mut stack: Vec<Value> = Vec::with_capacity(stack_count as usize);
+        for _ in 0..stack_count {
+            stack.push(Self::read_value_ref(
+                &self.stack_data,
+                &mut spos,
+                &pos_to_gc,
+                &mut heap,
+            )?);
+        }
+
+        // 4. Replace VM state.
+        vm.heap = heap;
+        vm.frames = frames;
+        vm.stack = stack;
+        vm.running = true;
+
+        Ok(())
+    }
+
+    // -- internal serialization helpers --
+
+    /// Serialize a single heap object into `buf`.
+    fn serialize_heap_object(
+        buf: &mut Vec<u8>,
+        obj: &HeapObject,
+        gc_to_pos: &HashMap<usize, u32>,
+        heap: &Heap,
+    ) {
+        match obj {
+            HeapObject::String(s) => {
+                Self::write_u8(buf, TAG_STRING);
+                Self::write_u32(buf, s.data.len() as u32);
+                buf.extend_from_slice(s.data.as_bytes());
+            }
+            HeapObject::List(list) => {
+                Self::write_u8(buf, TAG_LIST);
+                Self::write_u32(buf, list.elements.len() as u32);
+                for elem in &list.elements {
+                    Self::write_value_ref(buf, elem, gc_to_pos, heap);
+                }
+            }
+        }
+    }
+
+    /// Serialize a single call frame into `buf`.
+    fn serialize_frame(
+        buf: &mut Vec<u8>,
+        frame: &CallFrame,
+        gc_to_pos: &HashMap<usize, u32>,
+        heap: &Heap,
+    ) {
+        Self::write_u32(buf, frame.function as u32);
+        Self::write_u32(buf, frame.ip as u32);
+        Self::write_u32(buf, frame.locals.len() as u32);
+        for val in &frame.locals {
+            Self::write_value_ref(buf, val, gc_to_pos, heap);
+        }
+    }
+
+    /// Write a `Value`, translating heap Gc indices to snapshot
+    /// heap-section positions. Primitive values are written inline.
+    fn write_value_ref(
+        buf: &mut Vec<u8>,
+        val: &Value,
+        gc_to_pos: &HashMap<usize, u32>,
+        _heap: &Heap,
+    ) {
+        match val {
+            Value::Int(v) => {
+                Self::write_u8(buf, TAG_INT);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Float(v) => {
+                Self::write_u8(buf, TAG_FLOAT);
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            Value::Bool(v) => {
+                Self::write_u8(buf, TAG_BOOL);
+                Self::write_u8(buf, u8::from(*v));
+            }
+            Value::Null => {
+                Self::write_u8(buf, TAG_NULL);
+            }
+            Value::String(gc) => {
+                Self::write_u8(buf, TAG_STRING);
+                // Translate Gc index → heap position.
+                let pos = gc_to_pos
+                    .get(&gc.index)
+                    .expect("reachable Gc must have a position");
+                Self::write_u32(buf, *pos);
+            }
+            Value::List(gc) => {
+                Self::write_u8(buf, TAG_LIST);
+                let pos = gc_to_pos
+                    .get(&gc.index)
+                    .expect("reachable Gc must have a position");
+                Self::write_u32(buf, *pos);
+            }
+        }
+    }
+
+    /// Read a value that was written with `write_value_ref` (heap objects
+    /// are represented by position references).
+    fn read_value_ref(
+        data: &[u8],
+        pos: &mut usize,
+        pos_to_gc: &HashMap<u32, usize>,
+        _heap: &mut Heap,
+    ) -> Result<Value, SnapshotError> {
+        let tag = Self::read_u8(data, pos)?;
+        match tag {
+            TAG_INT => {
+                let end = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
+                let bytes: [u8; 8] = data
+                    .get(*pos..end)
+                    .ok_or(SnapshotError::UnexpectedEof)?
+                    .try_into()
+                    .unwrap();
+                *pos = end;
+                Ok(Value::Int(i64::from_le_bytes(bytes)))
+            }
+            TAG_FLOAT => {
+                let end = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
+                let bytes: [u8; 8] = data
+                    .get(*pos..end)
+                    .ok_or(SnapshotError::UnexpectedEof)?
+                    .try_into()
+                    .unwrap();
+                *pos = end;
+                Ok(Value::Float(f64::from_le_bytes(bytes)))
+            }
+            TAG_BOOL => {
+                let b = Self::read_u8(data, pos)?;
+                Ok(Value::Bool(b != 0))
+            }
+            TAG_NULL => Ok(Value::Null),
+            TAG_STRING => {
+                let heap_pos = Self::read_u32(data, pos)?;
+                let gc_index = pos_to_gc
+                    .get(&heap_pos)
+                    .ok_or(SnapshotError::InvalidHeapPosition(heap_pos))?;
+                // The heap already has this string; we just need a Gc handle.
+                // Gc is Copy and the index is stable.
+                Ok(Value::String(crate::heap::Gc::new(*gc_index)))
+            }
+            TAG_LIST => {
+                let heap_pos = Self::read_u32(data, pos)?;
+                let gc_index = pos_to_gc
+                    .get(&heap_pos)
+                    .ok_or(SnapshotError::InvalidHeapPosition(heap_pos))?;
+                Ok(Value::List(crate::heap::Gc::new(*gc_index)))
+            }
+            _ => Err(SnapshotError::UnknownObjectTag(tag)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::function::Function;
+    use crate::opcode::OpCode;
+
+    fn make_test_vm() -> VM {
+        let mut vm = VM::new();
+
+        // main(idx=0): Push(Int(42)); Halt
+        let main = Function::new(
+            "main",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Halt],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+
+        // Push a string onto the stack and a list as a local so we have
+        // heap objects in the snapshot.
+        let s = vm.alloc_string("hello snapshot".into());
+        vm.stack.push(Value::String(s));
+
+        let lst = vm.alloc_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        vm.stack.push(Value::List(lst));
+
+        vm
+    }
+
+    #[test]
+    fn snapshot_roundtrip_basic() {
+        let mut vm = make_test_vm();
+        let code_hash = vm.code_hash();
+
+        let snap = Snapshot::capture(&mut vm, code_hash);
+        assert_eq!(snap.header.magic, MAGIC);
+        assert_eq!(snap.header.version, VERSION);
+        assert!(snap.header.heap_count > 0, "should have heap objects");
+        assert!(snap.header.stack_count > 0, "should have stack values");
+
+        // Restore into a fresh VM with the same functions.
+        let mut restored = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Halt],
+            0,
+        );
+        restored.add_function(main);
+        restored.prepare(0).unwrap();
+
+        let ch = restored.code_hash();
+        snap.restore_into(&mut restored, ch).unwrap();
+
+        // Check stack contains the same values.
+        assert_eq!(restored.stack.len(), vm.stack.len());
+        // Stack items should match (heap refs are new Gc handles, but
+        // content should be identical).
+        assert!(matches!(restored.stack[0], Value::String(_)));
+        assert!(matches!(restored.stack[1], Value::List(_)));
+
+        if let Value::String(gc) = &restored.stack[0] {
+            assert_eq!(restored.heap.get(*gc).unwrap().data, "hello snapshot");
+        }
+        if let Value::List(gc) = &restored.stack[1] {
+            assert_eq!(
+                restored.heap.get(*gc).unwrap().elements,
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_nested_heap_objects() {
+        let mut vm = VM::new();
+        let inner = vm.alloc_string("nested".into());
+        let outer = vm.alloc_list(vec![Value::String(inner), Value::Int(7)]);
+        vm.stack.push(Value::List(outer));
+
+        let code_hash = vm.code_hash();
+        let snap = Snapshot::capture(&mut vm, code_hash);
+
+        let mut restored = VM::new();
+        let ch = restored.code_hash();
+        snap.restore_into(&mut restored, ch).unwrap();
+
+        if let Value::List(outer_gc) = &restored.stack[0] {
+            let outer_list = restored.heap.get(*outer_gc).unwrap();
+            assert_eq!(outer_list.elements.len(), 2);
+            if let Value::String(inner_gc) = &outer_list.elements[0] {
+                assert_eq!(restored.heap.get(*inner_gc).unwrap().data, "nested");
+            } else {
+                panic!("expected String at index 0");
+            }
+            assert_eq!(outer_list.elements[1], Value::Int(7));
+        } else {
+            panic!("expected List on stack");
+        }
+    }
+
+    #[test]
+    fn snapshot_preserves_call_frames() {
+        let mut vm = VM::new();
+        // add_one(x): load 0; push 1; add; ret
+        let add_one = Function::new(
+            "add_one",
+            1,
+            vec![
+                OpCode::Load(0),
+                OpCode::Push(Value::Int(1)),
+                OpCode::Add,
+                OpCode::Return,
+            ],
+            1,
+        );
+        // main: push 5; call add_one; halt
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Push(Value::Int(5)),
+                OpCode::Call(1),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(add_one);
+        vm.prepare(0).unwrap();
+
+        // Step into the Call instruction — this creates a frame for add_one
+        // with ip=0 and locals=[5].
+        vm.step().unwrap(); // Push(Int(5))
+        vm.step().unwrap(); // Call(1) → creates add_one frame
+
+        let code_hash = vm.code_hash();
+        let snap = Snapshot::capture(&mut vm, code_hash);
+
+        // Restore and verify frames.
+        let mut restored = VM::new();
+        let add_one_r = Function::new(
+            "add_one",
+            1,
+            vec![
+                OpCode::Load(0),
+                OpCode::Push(Value::Int(1)),
+                OpCode::Add,
+                OpCode::Return,
+            ],
+            1,
+        );
+        let main_r = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Push(Value::Int(5)),
+                OpCode::Call(1),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        restored.add_function(main_r);
+        restored.add_function(add_one_r);
+        restored.prepare(0).unwrap();
+
+        let ch = restored.code_hash();
+        snap.restore_into(&mut restored, ch).unwrap();
+
+        assert!(!restored.frames.is_empty());
+        // The active frame should be add_one.
+        let frame = restored.frames.last().unwrap();
+        assert_eq!(frame.function, 1); // add_one is index 1
+        assert_eq!(frame.ip, 0); // hasn't executed yet
+        assert_eq!(frame.locals[0], Value::Int(5));
+    }
+
+    #[test]
+    fn snapshot_file_write_read_roundtrip() {
+        let mut vm = make_test_vm();
+        let code_hash = vm.code_hash();
+        let snap = Snapshot::capture(&mut vm, code_hash);
+
+        let path = "/tmp/pausible_test_snapshot.bin";
+        snap.write_to_file(path).unwrap();
+
+        let loaded = Snapshot::read_from_file(path).unwrap();
+        assert_eq!(loaded.header.magic, MAGIC);
+        assert_eq!(loaded.header.code_hash, code_hash);
+        assert_eq!(loaded.header.heap_count, snap.header.heap_count);
+        assert_eq!(loaded.header.stack_count, snap.header.stack_count);
+
+        // Restore from the loaded snapshot.
+        let mut restored = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Halt],
+            0,
+        );
+        restored.add_function(main);
+        restored.prepare(0).unwrap();
+
+        let ch = restored.code_hash();
+        loaded.restore_into(&mut restored, ch).unwrap();
+        assert_eq!(restored.stack.len(), vm.stack.len());
+    }
+
+    #[test]
+    fn code_hash_mismatch_returns_error() {
+        let mut vm = make_test_vm();
+        let ch = vm.code_hash();
+        let snap = Snapshot::capture(&mut vm, ch);
+
+        // Restore with a wrong code hash.
+        let mut restored = VM::new();
+        let err = snap.restore_into(&mut restored, 0xDEAD_BEEF_CAFE_BABE).unwrap_err();
+        assert!(matches!(err, SnapshotError::CodeMismatch { .. }));
+    }
+
+    #[test]
+    fn snapshot_empty_vm() {
+        let mut vm = VM::new();
+        let main = Function::new("empty", 0, vec![OpCode::Halt], 0);
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+
+        let ch = vm.code_hash();
+        let snap = Snapshot::capture(&mut vm, ch);
+        assert_eq!(snap.header.heap_count, 0);
+        assert_eq!(snap.header.stack_count, 0);
+
+        let mut restored = VM::new();
+        let main2 = Function::new("empty", 0, vec![OpCode::Halt], 0);
+        restored.add_function(main2);
+        restored.prepare(0).unwrap();
+        let ch = restored.code_hash();
+        snap.restore_into(&mut restored, ch).unwrap();
+
+        assert!(restored.stack.is_empty());
+    }
+
+    #[test]
+    fn bad_magic_error() {
+        let data = vec![0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0];
+        let err = Snapshot::read_from_bytes(&data).unwrap_err();
+        assert!(matches!(err, SnapshotError::BadMagic { .. }));
+    }
+
+    #[test]
+    fn unsupported_version_error() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&MAGIC);
+        data.extend_from_slice(&99u32.to_le_bytes()); // version 99
+        data.extend_from_slice(&[0u8; 32]); // pad with zeros
+        let err = Snapshot::read_from_bytes(&data).unwrap_err();
+        assert!(matches!(err, SnapshotError::UnsupportedVersion(99)));
+    }
+
+    #[test]
+    fn snapshot_error_display() {
+        assert_eq!(
+            format!("{}", SnapshotError::UnknownObjectTag(0xFF)),
+            "unknown heap object tag: 0xFF"
+        );
+        assert_eq!(
+            format!("{}", SnapshotError::InvalidHeapPosition(7)),
+            "invalid heap position reference: 7"
+        );
+    }
+}

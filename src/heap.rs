@@ -229,6 +229,17 @@ impl Heap {
     /// 1. Reset all marks.
     /// 2. Mark roots (caller must invoke `mark_value` on every root).
     /// 3. Sweep — unmarked slots go into the free list.
+    ///
+    /// Returns whether the object at `idx` is currently marked.
+    pub(crate) fn is_marked(&self, idx: usize) -> bool {
+        self.marked.get(idx).copied().unwrap_or(false)
+    }
+
+    /// Returns a reference to the object at `idx`.
+    pub(crate) fn get_object(&self, idx: usize) -> Option<&HeapObject> {
+        self.objects.get(idx)
+    }
+
     pub fn collect_garbage_after_mark(&mut self) {
         self.sweep();
     }

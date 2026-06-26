@@ -36,7 +36,7 @@ pub struct CallFrame {
 }
 
 impl CallFrame {
-    fn new(function: usize, locals: Vec<Value>) -> Self {
+    pub(crate) fn new(function: usize, locals: Vec<Value>) -> Self {
         Self {
             function,
             ip: 0,
@@ -201,6 +201,42 @@ impl VM {
         self.frames.push(CallFrame::new(main_idx, locals));
         self.running = true;
         Ok(())
+    }
+
+    /// Compute a hash of the function table for code-mismatch detection.
+    ///
+    /// Uses the output of  as the basis so
+    /// that the hash reflects the full bytecode, including embedded
+    /// heap constants. Two identical function tables produce the same
+    /// hash; any change to instructions or embedded values changes it.
+    #[must_use]
+    pub fn code_hash(&self) -> u64 {
+        use std::hash::Hasher;
+        let module_bytes = crate::chunk::serialize_module(&self.functions, &self.heap);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(&module_bytes);
+        hasher.finish()
+    }
+
+    /// Create a snapshot of the current VM state.
+    #[must_use]
+    pub fn create_snapshot(&mut self) -> crate::snapshot::Snapshot {
+        let hash = self.code_hash();
+        crate::snapshot::Snapshot::capture(self, hash)
+    }
+
+    /// Restore VM state from a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns  if the current function
+    /// table does not match the one used when the snapshot was taken.
+    pub fn restore_snapshot(
+        &mut self,
+        snap: &crate::snapshot::Snapshot,
+    ) -> Result<(), crate::snapshot::SnapshotError> {
+        let hash = self.code_hash();
+        snap.restore_into(self, hash)
     }
 
     /// Execute until Halt or an error.

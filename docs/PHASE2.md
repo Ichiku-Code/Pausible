@@ -22,13 +22,13 @@
 - `SerCtx` / `DeCtx` ✅：序列化/反序列化上下文，管理对象引用映射
 - 所有 `Value` 类型 ✅（含 `String`、`List`）实现 `Serializable`
 
-### 2.4 Snapshot 格式
+### 2.4 Snapshot 格式 ✅
 
-- 文件头：magic `"PAUS"`、version、code_hash、timestamp
-- 堆对象序列化：复用 GC 根扫描定位可达对象，按 DFS 顺序写入
-- 栈帧序列化：所有 `CallFrame` 的 `locals` 和 `ip`
-- 全局值表：命名全局变量与值的映射
-- 文件读写：`Snapshot::write(path)` / `Snapshot::read(path)`
+- ✅ 文件头：magic `"PAUS"`、version、code_hash、timestamp
+- ✅ 堆对象序列化：复用 GC 根扫描定位可达对象，按 DFS 顺序写入
+- ✅ 栈帧序列化：所有 `CallFrame` 的 `locals` 和 `ip`
+- ✅ 全局值表：命名全局变量与值的映射
+- ✅ 文件读写：`Snapshot::write_to_file(path)` / `Snapshot::read_from_file(path)`
 
 ### 2.5 Yield 指令
 
