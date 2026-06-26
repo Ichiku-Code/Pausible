@@ -364,7 +364,7 @@ impl VM {
                 // For Phase 1, leave return value handling to the bytecode.
                 let _ = frame;
             }
-            OpCode::Halt => {
+            OpCode::Yield | OpCode::Halt => {
                 self.running = false;
             }
         }
@@ -932,4 +932,29 @@ mod tests {
         assert_eq!(vm.heap.len(), 1);
         assert_eq!(vm.get_string(b).unwrap().data, "two");
     }
+    #[test]
+    fn yield_pauses_execution() {
+        let mut vm = make_vm(vec![
+            OpCode::Push(Value::Int(42)),
+            OpCode::Yield,
+            OpCode::Push(Value::Int(99)),
+            OpCode::Halt,
+        ]);
+        vm.step().unwrap(); // push 42
+        assert_eq!(vm.stack, &[Value::Int(42)]);
+        assert!(vm.running);
+
+        vm.step().unwrap(); // yield -> pauses
+        assert!(!vm.running);
+        // Stack is unchanged after yield
+        assert_eq!(vm.stack, &[Value::Int(42)]);
+
+        // Can resume after yield
+        vm.running = true;
+        vm.step().unwrap(); // push 99
+        assert_eq!(vm.stack, &[Value::Int(42), Value::Int(99)]);
+        vm.step().unwrap(); // halt
+        assert!(!vm.running);
+    }
+
 }

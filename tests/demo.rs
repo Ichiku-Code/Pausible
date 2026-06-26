@@ -250,3 +250,66 @@ fn nested_compose() {
     let vm = run_program(vec![main, square, double]);
     assert_eq!(vm.stack, vec![Value::Int(36)]);
 }
+
+#[test]
+fn yield_snapshot_resume_roundtrip() {
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    let code = vec![
+        OpCode::Push(Value::Int(1)),
+        OpCode::Yield,
+        OpCode::Push(Value::Int(2)),
+        OpCode::Yield,
+        OpCode::Push(Value::Int(3)),
+        OpCode::Halt,
+    ];
+
+    // Step through one instruction at a time
+    let mut vm = VM::new();
+    let main = Function::new("main", 0, code.clone(), 0);
+    vm.add_function(main);
+    vm.prepare(0).unwrap();
+
+    vm.step().unwrap(); // push 1
+    assert_eq!(vm.stack, &[Value::Int(1)]);
+    assert!(vm.running);
+
+    vm.step().unwrap(); // yield -> pauses
+    assert!(!vm.running);
+    assert_eq!(vm.stack, &[Value::Int(1)]);
+
+    // Take snapshot at yield point
+    let snap = vm.create_snapshot();
+
+    // Restore into fresh VM
+    let mut restored = VM::new();
+    let main2 = Function::new("main", 0, code.clone(), 0);
+    restored.add_function(main2);
+    restored.restore_snapshot(&snap).unwrap();
+    assert!(restored.running);
+    assert_eq!(restored.stack, &[Value::Int(1)]);
+
+    // Resume from yield: push 2, yield, push 3, halt
+    restored.step().unwrap(); // push 2
+    assert_eq!(restored.stack, &[Value::Int(1), Value::Int(2)]);
+    restored.step().unwrap(); // yield -> pauses
+    assert!(!restored.running);
+
+    restored.step().unwrap(); // push 3
+    restored.step().unwrap(); // halt
+    assert!(!restored.running);
+    assert_eq!(restored.stack, &[Value::Int(1), Value::Int(2), Value::Int(3)]);
+
+    // Also test run() stops at first yield
+    let mut vm3 = VM::new();
+    let main3 = Function::new("main", 0, code, 0);
+    vm3.add_function(main3);
+    vm3.prepare(0).unwrap();
+    vm3.run().unwrap();
+    // run() stops at the first Yield, so only push 1 executed
+    assert_eq!(vm3.stack, &[Value::Int(1)]);
+}
+

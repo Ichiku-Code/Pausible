@@ -116,6 +116,7 @@ mod tag {
     pub const STORE: u8 = 0x17;
     pub const CALL: u8 = 0x18;
     pub const RETURN: u8 = 0x19;
+    pub const YIELD: u8 = 0x1A;
 }
 
 /// Value type tags.
@@ -242,6 +243,7 @@ fn write_opcode(buf: &mut Vec<u8>, op: &OpCode, heap: &Heap) {
             write_u32(buf, *idx as u32);
         }
         OpCode::Return => buf.push(tag::RETURN),
+        OpCode::Yield => buf.push(tag::YIELD),
         OpCode::Halt => buf.push(tag::HALT),
     }
 }
@@ -362,6 +364,7 @@ fn read_opcode(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<OpCode, 
             Ok(OpCode::Call(idx))
         }
         tag::RETURN => Ok(OpCode::Return),
+        tag::YIELD => Ok(OpCode::Yield),
         _ => Err(SerError::UnknownOpcode(*tag)),
     }
 }

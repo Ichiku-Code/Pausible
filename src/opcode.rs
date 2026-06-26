@@ -59,6 +59,8 @@ pub enum OpCode {
     Return,
     /// Stop execution of the VM.
     Halt,
+    /// Pause execution and yield control to the host.
+    Yield,
 }
 
 impl OpCode {
@@ -92,6 +94,7 @@ impl OpCode {
             Self::Call(_) => "call",
             Self::Return => "ret",
             Self::Halt => "halt",
+            Self::Yield => "yield",
         }
     }
 }
@@ -143,6 +146,7 @@ mod tests {
         assert_eq!(OpCode::Call(0).mnemonic(), "call");
         assert_eq!(OpCode::Return.mnemonic(), "ret");
         assert_eq!(OpCode::Halt.mnemonic(), "halt");
+        assert_eq!(OpCode::Yield.mnemonic(), "yield");
     }
 
     #[test]
@@ -162,6 +166,7 @@ mod tests {
         assert_eq!(format!("{}", OpCode::Add), "add");
         assert_eq!(format!("{}", OpCode::Return), "ret");
         assert_eq!(format!("{}", OpCode::Halt), "halt");
+        assert_eq!(format!("{}", OpCode::Yield), "yield");
     }
 
     #[test]
@@ -194,8 +199,9 @@ mod tests {
             OpCode::Call(0),
             OpCode::Return,
             OpCode::Halt,
+            OpCode::Yield,
         ];
-        assert_eq!(variants.len(), 26);
+        assert_eq!(variants.len(), 27);
     }
 
     #[test]

@@ -30,11 +30,11 @@
 - ✅ 全局值表：命名全局变量与值的映射
 - ✅ 文件读写：`Snapshot::write_to_file(path)` / `Snapshot::read_from_file(path)`
 
-### 2.5 Yield 指令
+### 2.5 Yield 指令 ✅
 
-- `OpCode::Yield`：挂起当前程序
-- VM 执行流程：GC 扫描 → 序列化快照 → 写入文件 → 终止运行
-- 无 I/O、无并发：yield 点只能出现在纯计算任务中
+- ✅ `OpCode::Yield`：挂起当前程序
+- ✅ VM 执行流程：GC 扫描 → 序列化快照 → 写入文件 → 终止运行
+- ✅ 无 I/O、无并发：yield 点只能出现在纯计算任务中
 
 ### 2.6 恢复 (Resume)
 
