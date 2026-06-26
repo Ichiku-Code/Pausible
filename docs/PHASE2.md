@@ -11,11 +11,11 @@
 
 ### 2.2 标记-清除 GC
 
-- 根集扫描：遍历所有 `CallFrame` 的 `locals` 和操作数栈
-- 标记阶段：从根出发递归标记所有可达堆对象
-- 清除阶段：回收未标记对象，释放堆内存
-- 触发策略：堆达到阈值时自动触发
-
+- 根集扫描：遍历所有 CallFrame 的 locals 和操作数栈 ✅
+- 标记阶段：从根出发递归标记所有可达堆对象 ✅
+- 清除阶段：回收未标记对象，释放堆内存 ✅
+- 触发策略：堆达到阈值时自动触发 ✅
+- 索引稳定性：GC 不删除 Vec 元素，死槽回收至 free_slots ✅
 ### 2.3 序列化基础设施
 
 - `Serializable` trait：`serialize(&self, ctx: &mut SerCtx)` / `deserialize(ctx: &mut DeCtx) -> Self`

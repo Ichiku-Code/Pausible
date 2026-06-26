@@ -574,7 +574,7 @@ mod tests {
             0,
             vec![
                 OpCode::Push(Value::Int(42)),
-                OpCode::Push(Value::Float(3.14)),
+                OpCode::Push(Value::Float(1.5)),
                 OpCode::Push(Value::Bool(true)),
                 OpCode::Push(Value::Bool(false)),
                 OpCode::Push(Value::Null),

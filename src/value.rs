@@ -311,8 +311,8 @@ mod tests {
 
     #[test]
     fn float_is_float() {
-        assert!(Value::Float(3.14).is_float());
-        assert!(!Value::Float(3.14).is_int());
+        assert!(Value::Float(1.5).is_float());
+        assert!(!Value::Float(1.5).is_int());
     }
 
     #[test]
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn negate() {
         assert_eq!(Value::Int(5).neg(), Ok(Value::Int(-5)));
-        assert_eq!(Value::Float(3.14).neg(), Ok(Value::Float(-3.14)));
+        assert_eq!(Value::Float(1.5).neg(), Ok(Value::Float(-1.5)));
         assert!(Value::Bool(true).neg().is_err());
     }
 
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn display_basic() {
         assert_eq!(format!("{}", Value::Int(42)), "42");
-        assert_eq!(format!("{}", Value::Float(3.14)), "3.14");
+        assert_eq!(format!("{}", Value::Float(1.5)), "1.5");
         assert_eq!(format!("{}", Value::Bool(true)), "true");
         assert_eq!(format!("{}", Value::Bool(false)), "false");
         assert_eq!(format!("{}", Value::Null), "null");

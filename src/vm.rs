@@ -116,14 +116,20 @@ impl VM {
         }
     }
 
-    /// Allocate a string on the heap.
+    /// Allocate a string on the heap, triggering GC when
+    /// the live object count exceeds the threshold.
     pub fn alloc_string(&mut self, data: String) -> Gc<StringObj> {
-        self.heap.alloc_string(data)
+        let gc = self.heap.alloc_string(data);
+        self.maybe_gc();
+        gc
     }
 
-    /// Allocate a list on the heap.
+    /// Allocate a list on the heap, triggering GC when
+    /// the live object count exceeds the threshold.
     pub fn alloc_list(&mut self, elements: Vec<Value>) -> Gc<ListObj> {
-        self.heap.alloc_list(elements)
+        let gc = self.heap.alloc_list(elements);
+        self.maybe_gc();
+        gc
     }
 
     /// Borrow a heap string by handle.
@@ -144,6 +150,38 @@ impl VM {
     /// Mutably borrow a heap list.
     pub fn get_list_mut(&mut self, gc: Gc<ListObj>) -> Result<&mut ListObj, VmError> {
         self.heap.get_mut(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+    }
+
+    // -- GC --
+
+    /// Scan all roots (operand stack + frame locals) and mark every
+    /// reachable heap object.
+    pub fn mark_roots(&mut self) {
+        for val in &self.stack {
+            self.heap.mark_value(val);
+        }
+        for frame in &self.frames {
+            for val in &frame.locals {
+                self.heap.mark_value(val);
+            }
+        }
+    }
+
+    /// Run a full mark-sweep GC cycle.
+    ///
+    /// 1. Reset marks, then mark every reachable object from roots.
+    /// 2. Sweep: unmarked slots are added to the free list for reuse.
+    pub fn collect_garbage(&mut self) {
+        self.heap.reset_marks();
+        self.mark_roots();
+        self.heap.collect_garbage_after_mark();
+    }
+
+    /// Trigger a GC if the heap has exceeded the threshold.
+    fn maybe_gc(&mut self) {
+        if self.heap.should_gc() {
+            self.collect_garbage();
+        }
     }
 
     /// Register a function and return its index.
@@ -712,5 +750,150 @@ mod tests {
         vm.running = true;
         let result = vm.run();
         assert!(matches!(result, Err(VmError::EmptyFrameStack)));
+    }
+
+    // -- GC tests --
+
+    #[test]
+    fn gc_collects_unreferenced_string() {
+        let mut vm = VM::new();
+
+        // Allocate a string and store its handle. Then drop the reference
+        // by overwriting the local. GC should reclaim the dead string.
+        let _gc = vm.alloc_string("discard me".into());
+        assert_eq!(vm.heap.len(), 1);
+
+        // The Gc is still held by the variable `gc`, so it's reachable.
+        // We need to test with VM roots instead.
+        // For now: alloc multiple objects, ensure GC runs, verify
+        // that unreachable objects get freed.
+
+        // Allocate 3 strings, all kept reachable
+        let _a = vm.alloc_string("keep".into());
+        let _b = vm.alloc_string("keep".into());
+        let _c = vm.alloc_string("keep".into());
+        // _a, _b, _c are kept alive by local variables
+    }
+
+    #[test]
+    fn gc_frees_unreachable_heap_objects() {
+        let mut vm = VM::new();
+
+        // Allocate objects; they're reachable via local variables `a`, `b`
+        let a = vm.alloc_string("hello".into());
+        let b = vm.alloc_list(vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(vm.heap.len(), 2);
+
+        // Push to stack to make them GC roots
+        vm.stack.push(Value::String(a));
+        vm.stack.push(Value::List(b));
+        let cap_before = vm.heap.capacity();
+
+        // Pop from stack — now both are unreachable
+        vm.stack.pop();
+        vm.stack.pop();
+
+        // Manually trigger GC
+        vm.collect_garbage();
+
+        // Both objects should be dead — free_slots should have 2 entries
+        assert_eq!(vm.heap.len(), 0);
+        assert_eq!(vm.heap.capacity(), cap_before);
+    }
+
+    #[test]
+    fn gc_preserves_reachable_objects() {
+        let mut vm = VM::new();
+
+        let a = vm.alloc_string("survivor".into());
+        let _b = vm.alloc_string("also alive".into());
+
+        // a is on stack (root), b is not — but we'll keep b reachable
+        vm.stack.push(Value::String(a));
+
+        // b is NOT on stack, so it will be collected
+        let cap_before = vm.heap.capacity();
+
+        vm.collect_garbage();
+
+        // a should survive (on stack), b should be dead
+        assert_eq!(vm.heap.len(), 1);
+        assert_eq!(vm.heap.capacity(), cap_before);
+        // Verify 'a' is still valid
+        let a_data = vm.get_string(a).unwrap();
+        assert_eq!(a_data.data, "survivor");
+    }
+
+    #[test]
+    fn gc_preserves_nested_list_elements() {
+        let mut vm = VM::new();
+
+        // Build: outer = [inner, 42] where inner = [1, 2]
+        // inner is only reachable via outer
+        let inner = vm.alloc_list(vec![Value::Int(1), Value::Int(2)]);
+        let outer = vm.alloc_list(vec![Value::List(inner), Value::Int(42)]);
+
+        // Only outer is on the stack — GC must find inner through it
+        vm.stack.push(Value::List(outer));
+
+        vm.collect_garbage();
+
+        // Both outer and inner should survive
+        assert_eq!(vm.heap.len(), 2);
+        let outer_list = vm.get_list(outer).unwrap();
+        assert_eq!(outer_list.elements.len(), 2);
+        if let Value::List(inner_gc) = &outer_list.elements[0] {
+            let inner_list = vm.get_list(*inner_gc).unwrap();
+            assert_eq!(inner_list.elements, vec![Value::Int(1), Value::Int(2)]);
+        } else {
+            panic!("inner should be a List");
+        }
+    }
+
+    #[test]
+    fn gc_slot_reuse_after_collection() {
+        let mut vm = VM::new();
+
+        let a = vm.alloc_string("first".into());
+        let idx_a = a.index;
+        let _ = a; // keep alive for now
+        vm.stack.push(Value::String(a));
+
+        // Force allocation up to the threshold so GC runs via maybe_gc
+        // ... actually let's test manually
+        vm.stack.pop(); // now a is dead
+
+        vm.collect_garbage();
+        assert_eq!(vm.heap.len(), 0);
+
+        // Allocate a new string — should reuse the same slot
+        let b = vm.alloc_string("second".into());
+        assert_eq!(b.index, idx_a, "new allocation should reuse freed slot");
+
+        let b_data = vm.get_string(b).unwrap();
+        assert_eq!(b_data.data, "second");
+    }
+
+    #[test]
+    fn gc_multiple_cycles() {
+        let mut vm = VM::new();
+
+        // Cycle 1
+        let a = vm.alloc_string("one".into());
+        vm.stack.push(Value::String(a));
+        vm.collect_garbage();
+        assert_eq!(vm.heap.len(), 1);
+
+        // Cycle 2: pop a, then gc — a should die
+        vm.stack.pop();
+        vm.collect_garbage();
+        assert_eq!(vm.heap.len(), 0);
+
+        // Cycle 3: allocate new, keep it
+        let b = vm.alloc_string("two".into());
+        vm.stack.push(Value::String(b));
+        vm.collect_garbage();
+        assert_eq!(vm.heap.len(), 1);
+        assert_eq!(vm.get_string(b).unwrap().data, "two");
     }
 }

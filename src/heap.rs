@@ -65,11 +65,27 @@ pub enum HeapObject {
 /// Manages allocation and storage of all heap objects.
 ///
 /// Objects are stored in a flat `Vec`. A `Gc<T>` is just an index
-/// into this vector. The heap does not free individual objects;
-/// that is the GC's job (Phase 2.2).
-#[derive(Debug, Clone, Default)]
+/// into this vector. Dead slots are tracked in `free_slots` for
+/// reuse; the GC never deletes objects, preserving index stability.
+///
+/// Default GC threshold: 256 live objects.
+const DEFAULT_GC_THRESHOLD: usize = 256;
+
+#[derive(Debug, Clone)]
 pub struct Heap {
     objects: Vec<HeapObject>,
+    /// Per-object liveness tracking for the mark-sweep GC.
+    marked: Vec<bool>,
+    /// Indices of slots that have been freed and may be reused.
+    free_slots: Vec<usize>,
+    /// Trigger a GC cycle when the live object count exceeds this.
+    gc_threshold: usize,
+}
+
+impl Default for Heap {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Heap {
@@ -77,34 +93,63 @@ impl Heap {
     pub fn new() -> Self {
         Self {
             objects: Vec::new(),
+            marked: Vec::new(),
+            free_slots: Vec::new(),
+            gc_threshold: DEFAULT_GC_THRESHOLD,
         }
     }
 
-    /// Number of live objects (for GC heuristics).
+    /// Number of live objects (total minus free slots).
     #[must_use]
     pub fn len(&self) -> usize {
+        self.objects.len().saturating_sub(self.free_slots.len())
+    }
+
+    /// Total capacity (including free slots).
+    #[must_use]
+    pub fn capacity(&self) -> usize {
         self.objects.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.len() == 0
     }
 
     /// Allocate a string on the heap, returning a typed handle.
+    ///
+    /// Reuses a free slot when available; otherwise appends to the
+    /// object vector (index-stable).
     pub fn alloc_string(&mut self, data: String) -> Gc<StringObj> {
-        let index = self.objects.len();
-        self.objects
-            .push(HeapObject::String(StringObj { data }));
-        Gc::new(index)
+        let obj = HeapObject::String(StringObj { data });
+        if let Some(idx) = self.free_slots.pop() {
+            self.objects[idx] = obj;
+            self.marked[idx] = false;
+            Gc::new(idx)
+        } else {
+            let idx = self.objects.len();
+            self.objects.push(obj);
+            self.marked.push(false);
+            Gc::new(idx)
+        }
     }
 
     /// Allocate a list on the heap, returning a typed handle.
+    ///
+    /// Reuses a free slot when available; otherwise appends to the
+    /// object vector (index-stable).
     pub fn alloc_list(&mut self, elements: Vec<crate::value::Value>) -> Gc<ListObj> {
-        let index = self.objects.len();
-        self.objects
-            .push(HeapObject::List(ListObj { elements }));
-        Gc::new(index)
+        let obj = HeapObject::List(ListObj { elements });
+        if let Some(idx) = self.free_slots.pop() {
+            self.objects[idx] = obj;
+            self.marked[idx] = false;
+            Gc::new(idx)
+        } else {
+            let idx = self.objects.len();
+            self.objects.push(obj);
+            self.marked.push(false);
+            Gc::new(idx)
+        }
     }
 
     /// Borrow a heap object by typed handle.
@@ -118,6 +163,81 @@ impl Heap {
         self.objects
             .get_mut(gc.index)
             .and_then(|obj| T::from_heap_mut(obj))
+    }
+
+    // -- GC (mark-sweep with free-list) --
+
+    /// True when the live object count exceeds the GC threshold.
+    #[must_use]
+    pub fn should_gc(&self) -> bool {
+        self.len() > self.gc_threshold
+    }
+
+    /// Mark the object at `idx` as reachable, then recursively mark
+    /// its children (List elements that are heap references).
+    pub(crate) fn mark(&mut self, idx: usize) {
+        // Already marked, or out of bounds (should never happen for valid Gc).
+        if self.marked.get(idx) != Some(&false) {
+            return;
+        }
+        self.marked[idx] = true;
+
+        // Collect child heap indices to avoid borrow-conflict with recursion.
+        let children: Vec<usize> = match &self.objects[idx] {
+            HeapObject::List(list) => list
+                .elements
+                .iter()
+                .filter_map(|val| match val {
+                    crate::value::Value::String(gc) => Some(gc.index),
+                    crate::value::Value::List(gc) => Some(gc.index),
+                    _ => None,
+                })
+                .collect(),
+            HeapObject::String(_) => Vec::new(),
+        };
+
+        for child_idx in children {
+            self.mark(child_idx);
+        }
+    }
+
+    /// External root-scanning entry point: mark the heap object
+    /// referenced by a `Value` if that value is a heap type.
+    pub(crate) fn mark_value(&mut self, val: &crate::value::Value) {
+        match val {
+            crate::value::Value::String(gc) => self.mark(gc.index),
+            crate::value::Value::List(gc) => self.mark(gc.index),
+            _ => {}
+        }
+    }
+
+    /// Sweep: rebuild the free-slot list from unmarked objects
+    /// and reset marks on survivors for the next GC cycle.
+    fn sweep(&mut self) {
+        self.free_slots.clear();
+        for (i, m) in self.marked.iter_mut().enumerate() {
+            if *m {
+                *m = false; // survivor: reset mark
+            } else {
+                self.free_slots.push(i); // dead: available for reuse
+            }
+        }
+    }
+
+    /// Run a full mark-sweep GC cycle.
+    ///
+    /// 1. Reset all marks.
+    /// 2. Mark roots (caller must invoke `mark_value` on every root).
+    /// 3. Sweep — unmarked slots go into the free list.
+    pub fn collect_garbage_after_mark(&mut self) {
+        self.sweep();
+    }
+
+    /// Reset all marks before a new mark phase begins.
+    pub(crate) fn reset_marks(&mut self) {
+        for m in &mut self.marked {
+            *m = false;
+        }
     }
 }
 
