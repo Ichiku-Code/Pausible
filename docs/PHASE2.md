@@ -18,9 +18,9 @@
 - 索引稳定性：GC 不删除 Vec 元素，死槽回收至 free_slots ✅
 ### 2.3 序列化基础设施
 
-- `Serializable` trait：`serialize(&self, ctx: &mut SerCtx)` / `deserialize(ctx: &mut DeCtx) -> Self`
-- `SerCtx` / `DeCtx`：序列化/反序列化上下文，管理对象引用映射
-- 所有 `Value` 类型（含 `String`、`List`）实现 `Serializable`
+- `Serializable` trait ✅：`serialize(&self, ctx: &mut SerCtx)` / `deserialize(ctx: &mut DeCtx) -> Self`
+- `SerCtx` / `DeCtx` ✅：序列化/反序列化上下文，管理对象引用映射
+- 所有 `Value` 类型 ✅（含 `String`、`List`）实现 `Serializable`
 
 ### 2.4 Snapshot 格式
 
