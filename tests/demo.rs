@@ -414,3 +414,344 @@ fn resume_with_string_heap_objects() {
     }
 }
 
+
+// -- Phase 2.7: 跨架构验证与测试 --
+
+// 斐波那契 yield 中途保存，恢复后得出正确结果
+#[test]
+fn fibonacci_yield_midpoint_resume() {
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    // Iterative fib(6) = 8, yield when counter hits 3 (midpoint)
+    // locals: 0=counter, 1=a, 2=b, 3=temp(c)
+    let fib = Function::new(
+        "fib",
+        0,
+        vec![
+            // Setup: counter=5, a=0, b=1
+            OpCode::Push(Value::Int(5)),     // 0: counter = 5
+            OpCode::Store(0),                // 1
+            OpCode::Push(Value::Int(0)),     // 2: a = 0
+            OpCode::Store(1),                // 3
+            OpCode::Push(Value::Int(1)),     // 4: b = 1
+            OpCode::Store(2),                // 5
+            // loop:
+            OpCode::Load(0),                 // 6: push counter
+            OpCode::Push(Value::Int(0)),     // 7
+            OpCode::Eq,                      // 8: counter == 0?
+            OpCode::JumpIfTrue(28),          // 9: if so, goto end
+            OpCode::Load(0),                 // 10: push counter
+            OpCode::Push(Value::Int(3)),     // 11
+            OpCode::Eq,                      // 12: counter == 3?
+            OpCode::JumpIfFalse(15),         // 13: skip yield
+            OpCode::Yield,                   // 14: yield at midpoint
+            OpCode::Load(1),                 // 15: push a
+            OpCode::Load(2),                 // 16: push b
+            OpCode::Add,                     // 17: c = a+b
+            OpCode::Store(3),                // 18: local[3] = c
+            OpCode::Load(2),                 // 19: push b
+            OpCode::Store(1),                // 20: a = b
+            OpCode::Load(3),                 // 21: push c
+            OpCode::Store(2),                // 22: b = c
+            OpCode::Load(0),                 // 23: push counter
+            OpCode::Push(Value::Int(1)),     // 24
+            OpCode::Sub,                     // 25: counter - 1
+            OpCode::Store(0),                // 26: counter = counter-1
+            OpCode::Jump(6),                 // 27: loop
+            // end:
+            OpCode::Load(2),                 // 28: push result (b)
+            OpCode::Halt,                    // 29
+        ],
+        4, // 4 locals
+    );
+
+    let mut vm = VM::new();
+    vm.add_function(fib);
+    vm.prepare(0).unwrap();
+
+    vm.run().unwrap();
+    assert!(!vm.running, "should have yielded");
+
+    // At this point: counter=3, a=1, b=2 (fib(2)=1, fib(3)=2)
+    let snap = vm.create_snapshot();
+
+    // Resume: compute remaining terms (fib(4)=3, fib(5)=5, fib(6)=8)
+    vm.resume(&snap).unwrap();
+    assert!(!vm.running, "should have halted");
+
+    // Result: fib(6) = 8
+    assert_eq!(vm.stack, &[Value::Int(8)]);
+}
+
+// 阶乘嵌套 yield（多次保存/恢复）
+#[test]
+fn factorial_nested_yields() {
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    // Iterative factorial: fact(5) = 120, yield every iteration
+    // locals: 0=counter, 1=result
+    let fact = Function::new(
+        "fact",
+        0,
+        vec![
+            // Setup: counter=5, result=1
+            OpCode::Push(Value::Int(5)),     // 0
+            OpCode::Store(0),                // 1: counter = 5
+            OpCode::Push(Value::Int(1)),     // 2
+            OpCode::Store(1),                // 3: result = 1
+            // loop:
+            OpCode::Load(0),                 // 4: push counter
+            OpCode::Push(Value::Int(0)),     // 5
+            OpCode::Eq,                      // 6: counter == 0?
+            OpCode::JumpIfTrue(22),          // 7: yes -> end
+            OpCode::Load(1),                 // 8: push result
+            OpCode::Load(0),                 // 9: push counter
+            OpCode::Mul,                     // 10: result * counter
+            OpCode::Store(1),                // 11: result = result * counter
+            OpCode::Load(0),                 // 12: push counter
+            OpCode::Push(Value::Int(1)),     // 13
+            OpCode::Sub,                     // 14: counter - 1
+            OpCode::Store(0),                // 15: counter = counter - 1
+            OpCode::Load(0),                 // 16: push counter
+            OpCode::Push(Value::Int(0)),     // 17: push 0
+            OpCode::Eq,                      // 18: counter == 0?
+            OpCode::JumpIfTrue(4),           // 19: if counter==0, skip yield, loop back
+            OpCode::Yield,                   // 20: yield only when counter > 0
+            OpCode::Jump(4),                 // 21: loop back
+            // end:
+            OpCode::Load(1),                 // 22: push result
+            OpCode::Halt,                    // 23
+        ],
+        2,
+    );
+
+    let mut vm = VM::new();
+    vm.add_function(fact);
+    vm.prepare(0).unwrap();
+
+    // Yield cycle 1: counter goes from 5 to 4, result=5
+    vm.run().unwrap();
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[0], Value::Int(4));
+    assert_eq!(vm.frames[0].locals[1], Value::Int(5));
+    let snap1 = vm.create_snapshot();
+
+    // Yield cycle 2: counter 4->3, result=20
+    vm.resume(&snap1).unwrap();
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[0], Value::Int(3));
+    assert_eq!(vm.frames[0].locals[1], Value::Int(20));
+    let snap2 = vm.create_snapshot();
+
+    // Yield cycle 3: counter 3->2, result=60
+    vm.resume(&snap2).unwrap();
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[0], Value::Int(2));
+    assert_eq!(vm.frames[0].locals[1], Value::Int(60));
+    let snap3 = vm.create_snapshot();
+
+    // Yield cycle 4: counter 2->1, result=120
+    vm.resume(&snap3).unwrap();
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[0], Value::Int(1));
+    assert_eq!(vm.frames[0].locals[1], Value::Int(120));
+    let snap4 = vm.create_snapshot();
+
+    // Final cycle: counter 1->0, result=120, loop exits, halt
+    vm.resume(&snap4).unwrap();
+    assert!(!vm.running);
+    assert_eq!(vm.stack, &[Value::Int(120)]);
+}
+
+// 带循环的程序：迭代中 yield，resume 后继续
+#[test]
+fn loop_yield_per_iteration() {
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    // Loop that accumulates sum(1..5), yielding each iteration
+    // locals: 0=i (counting down), 1=sum
+    let loop_sum = Function::new(
+        "sum",
+        0,
+        vec![
+            OpCode::Push(Value::Int(5)),     // 0
+            OpCode::Store(0),                // 1: i = 5
+            OpCode::Push(Value::Int(0)),     // 2
+            OpCode::Store(1),                // 3: sum = 0
+            // loop:
+            OpCode::Load(0),                 // 4: push i
+            OpCode::Push(Value::Int(0)),     // 5
+            OpCode::Eq,                      // 6: i == 0?
+            OpCode::JumpIfTrue(22),          // 7: yes -> end
+            OpCode::Load(1),                 // 8: push sum
+            OpCode::Load(0),                 // 9: push i
+            OpCode::Add,                     // 10: sum + i
+            OpCode::Store(1),                // 11: sum = sum + i
+            OpCode::Load(0),                 // 12: push i
+            OpCode::Push(Value::Int(1)),     // 13
+            OpCode::Sub,                     // 14: i - 1
+            OpCode::Store(0),                // 15: i = i - 1
+            OpCode::Load(0),                 // 16: push counter
+            OpCode::Push(Value::Int(0)),     // 17: push 0
+            OpCode::Eq,                      // 18: i == 0?
+            OpCode::JumpIfTrue(4),           // 19: if i==0, skip yield, loop back
+            OpCode::Yield,                   // 20: yield only when i > 0
+            OpCode::Jump(4),                 // 21: loop back
+            // end:
+            OpCode::Load(1),                 // 22: push sum
+            OpCode::Halt,                    // 23
+        ],
+        2,
+    );
+
+    let mut vm = VM::new();
+    vm.add_function(loop_sum);
+    vm.prepare(0).unwrap();
+
+    // Iteration 1: i=5, sum grows
+    vm.run().unwrap();
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[0], Value::Int(4));
+    assert_eq!(vm.frames[0].locals[1], Value::Int(5));
+    let snap1 = vm.create_snapshot();
+    vm.resume(&snap1).unwrap();
+
+    // Iteration 2: i=4, sum=9
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[1], Value::Int(9));
+    let snap2 = vm.create_snapshot();
+    vm.resume(&snap2).unwrap();
+
+    // Iteration 3: i=3, sum=12
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[1], Value::Int(12));
+    let snap3 = vm.create_snapshot();
+    vm.resume(&snap3).unwrap();
+
+    // Iteration 4: i=2, sum=14
+    assert!(!vm.running);
+    assert_eq!(vm.frames[0].locals[1], Value::Int(14));
+    let snap4 = vm.create_snapshot();
+    vm.resume(&snap4).unwrap();
+
+    // Iteration 5: i=1, sum=15, then loop exits
+    assert!(!vm.running);
+    assert_eq!(vm.stack, &[Value::Int(15)]);
+}
+
+// 端序一致性验证（to_le_bytes / from_le_bytes）
+#[test]
+fn endianness_consistency() {
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    // Verify that multi-byte scalars serialize as LE and deserialize exactly.
+    // i64::MIN, 0, i64::MAX each test different byte patterns.
+    let main = Function::new(
+        "main",
+        0,
+        vec![
+            OpCode::Push(Value::Int(i64::MIN)),
+            OpCode::Yield,
+            OpCode::Push(Value::Int(0)),
+            OpCode::Yield,
+            OpCode::Push(Value::Int(i64::MAX)),
+            OpCode::Halt,
+        ],
+        0,
+    );
+
+    let mut vm = VM::new();
+    vm.add_function(main);
+    vm.prepare(0).unwrap();
+    vm.run().unwrap(); // stop at Yield after push(i64::MIN)
+    assert_eq!(vm.stack, &[Value::Int(i64::MIN)]);
+
+    let snap = vm.create_snapshot();
+    vm.resume(&snap).unwrap(); // stop at Yield after push(0)
+    assert_eq!(vm.stack, &[Value::Int(i64::MIN), Value::Int(0)]);
+
+    let snap2 = vm.create_snapshot();
+    vm.resume(&snap2).unwrap(); // run until Halt
+    assert_eq!(
+        vm.stack,
+        &[Value::Int(i64::MIN), Value::Int(0), Value::Int(i64::MAX)]
+    );
+}
+
+// 浮点数跨平台确定性验证（IEEE 754 原始字节存储）
+#[test]
+fn floating_point_cross_platform_determinism() {
+    use pausible::function::Function;
+    use pausible::opcode::OpCode;
+    use pausible::value::Value;
+    use pausible::vm::VM;
+
+    // Verify IEEE 754 special values survive snapshot roundtrip.
+    // NaN, +inf, -inf, and -0.0 are stored as raw bytes (to_le_bytes)
+    // and must deserialize bit-identically.
+    let specials: [f64; 6] = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        0.0_f64,
+        -0.0_f64,
+        f64::MIN_POSITIVE,
+    ];
+
+    // Push each value, yield, snapshot, resume, check bits.
+    let main = Function::new(
+        "main",
+        0,
+        vec![
+            OpCode::Push(Value::Float(specials[0])),
+            OpCode::Yield,
+            OpCode::Push(Value::Float(specials[1])),
+            OpCode::Yield,
+            OpCode::Push(Value::Float(specials[2])),
+            OpCode::Yield,
+            OpCode::Push(Value::Float(specials[3])),
+            OpCode::Yield,
+            OpCode::Push(Value::Float(specials[4])),
+            OpCode::Yield,
+            OpCode::Push(Value::Float(specials[5])),
+            OpCode::Halt,
+        ],
+        0,
+    );
+
+    let mut vm = VM::new();
+    vm.add_function(main);
+    vm.prepare(0).unwrap();
+
+    for (i, &expected) in specials.iter().enumerate() {
+        vm.run().unwrap(); // stop at Yield (or Halt on last iteration)
+        // Check the bit pattern of the value we just pushed
+        if let Some(Value::Float(f)) = vm.stack.get(i) {
+            let bits_original = expected.to_bits();
+            let bits_restored = (*f).to_bits();
+            assert_eq!(
+                bits_restored, bits_original,
+                "float bits mismatch at index {i}: expected {bits_original:#018x}, got {bits_restored:#018x}"
+            );
+        }
+        // Snapshot and resume for the next value (except on the last, which halts)
+        if i < specials.len() - 1 {
+            let snap = vm.create_snapshot();
+            vm.resume(&snap).unwrap();
+        }
+    }
+
+    assert_eq!(vm.stack.len(), 6);
+}
