@@ -7,6 +7,8 @@ use core::fmt;
 use crate::function::Function;
 use crate::opcode::OpCode;
 use crate::heap::{Heap, Gc, ListObj, StringObj};
+use crate::io::{HandleId, IoHandle};
+use std::collections::HashMap;
 use crate::value::{TypeError, Value};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +118,10 @@ pub struct VM {
     pub running: bool,
     /// Heap for reference types (String, List, etc.).
     pub heap: Heap,
+    /// Registered I/O handles, keyed by `HandleId`.
+    pub handles: HashMap<HandleId, IoHandle>,
+    /// Monotonic counter for the next `HandleId` allocation.
+    next_handle_id: u32,
 }
 
 impl Default for VM {
@@ -132,6 +138,8 @@ impl VM {
             frames: Vec::new(),
             functions: Vec::new(),
             heap: Heap::new(),
+            handles: HashMap::new(),
+            next_handle_id: 0,
             running: false,
         }
     }
@@ -170,6 +178,39 @@ impl VM {
     /// Mutably borrow a heap list.
     pub fn get_list_mut(&mut self, gc: Gc<ListObj>) -> Result<&mut ListObj, VmError> {
         self.heap.get_mut(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+    }
+
+
+    // -- I/O handles --
+
+    /// Register an I/O handle and return its id.
+    pub fn create_handle(&mut self, handle: IoHandle) -> HandleId {
+        let id = HandleId(self.next_handle_id);
+        self.next_handle_id = self.next_handle_id.wrapping_add(1);
+        self.handles.insert(id, handle);
+        id
+    }
+
+    /// Borrow a registered I/O handle by id.
+    #[must_use]
+    pub fn get_handle(&self, id: HandleId) -> Option<&IoHandle> {
+        self.handles.get(&id)
+    }
+
+    /// Mutably borrow a registered I/O handle by id.
+    pub fn get_handle_mut(&mut self, id: HandleId) -> Option<&mut IoHandle> {
+        self.handles.get_mut(&id)
+    }
+
+    /// Remove an I/O handle from the registry.
+    pub fn close_handle(&mut self, id: HandleId) -> bool {
+        self.handles.remove(&id).is_some()
+    }
+
+    /// Number of registered I/O handles.
+    #[must_use]
+    pub fn handle_count(&self) -> usize {
+        self.handles.len()
     }
 
     // -- GC --
@@ -1084,6 +1125,129 @@ mod tests {
             format!("{}", ResumeError::Vm(VmError::Halted)),
             "resume VM error: VM halted"
         );
+    }
+
+
+    // -- I/O handle registry tests --
+
+    #[test]
+    fn handle_creation_and_retrieval() {
+        let mut vm = VM::new();
+        let h = IoHandle::File {
+            path: "/tmp/a.txt".into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+        };
+        let id = vm.create_handle(h);
+        assert_eq!(vm.handle_count(), 1);
+
+        let retrieved = vm.get_handle(id).unwrap();
+        assert_eq!(retrieved.kind_name(), "File");
+    }
+
+    #[test]
+    fn handle_id_monotonic() {
+        let mut vm = VM::new();
+        let h1 = IoHandle::Stdin { buffer: vec![] };
+        let h2 = IoHandle::Stdout { buffer: vec![] };
+
+        let id1 = vm.create_handle(h1);
+        let id2 = vm.create_handle(h2);
+        assert_eq!(id1, HandleId(0));
+        assert_eq!(id2, HandleId(1));
+    }
+
+    #[test]
+    fn close_handle_removes_from_registry() {
+        let mut vm = VM::new();
+        let h = IoHandle::Timer {
+            ms: 100,
+            strategy: crate::io::IoStrategy::Replay,
+        };
+        let id = vm.create_handle(h);
+        assert_eq!(vm.handle_count(), 1);
+
+        assert!(vm.close_handle(id));
+        assert_eq!(vm.handle_count(), 0);
+        assert!(vm.get_handle(id).is_none());
+    }
+
+    #[test]
+    fn close_nonexistent_handle_returns_false() {
+        let mut vm = VM::new();
+        assert!(!vm.close_handle(HandleId(99)));
+    }
+
+    #[test]
+    fn get_handle_mut_allows_modification() {
+        let mut vm = VM::new();
+        let h = IoHandle::File {
+            path: "/tmp/log.txt".into(),
+            mode: crate::io::FileMode::Write,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+        };
+        let id = vm.create_handle(h);
+
+        if let Some(IoHandle::File { position, .. }) = vm.get_handle_mut(id) {
+            *position = 128;
+        }
+
+        if let Some(IoHandle::File { position, .. }) = vm.get_handle(id) {
+            assert_eq!(*position, 128);
+        } else {
+            panic!("expected File handle");
+        }
+    }
+
+    #[test]
+    fn handle_count_starts_at_zero() {
+        let vm = VM::new();
+        assert_eq!(vm.handle_count(), 0);
+    }
+
+    #[test]
+    fn multiple_handle_types_coexist() {
+        let mut vm = VM::new();
+        vm.create_handle(IoHandle::Stdin { buffer: vec![1, 2] });
+        vm.create_handle(IoHandle::Stdout { buffer: vec![] });
+        vm.create_handle(IoHandle::File {
+            path: "/tmp/x".into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+        });
+        vm.create_handle(IoHandle::HttpConnection {
+            url: "https://example.com".into(),
+            method: crate::io::HttpMethod::Get,
+            body: None,
+            last_response: None,
+            strategy: crate::io::IoStrategy::Replay,
+        });
+        assert_eq!(vm.handle_count(), 4);
+    }
+
+    #[test]
+    fn vm_clone_preserves_handles() {
+        let mut vm = VM::new();
+        let h = IoHandle::Stdin { buffer: vec![42] };
+        vm.create_handle(h);
+        assert_eq!(vm.handle_count(), 1);
+
+        let vm2 = vm.clone();
+        assert_eq!(vm2.handle_count(), 1);
+    }
+
+    #[test]
+    fn handle_id_wrapping_is_safe() {
+        let mut vm = VM::new();
+        vm.next_handle_id = u32::MAX;
+        let h = IoHandle::Stdin { buffer: vec![] };
+        let id = vm.create_handle(h);
+        assert_eq!(id, HandleId(u32::MAX));
+        // wrapping_add: next becomes 0
+        assert_eq!(vm.next_handle_id, 0);
     }
 
 }

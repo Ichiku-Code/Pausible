@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod heap;
+pub mod io;
 pub mod value;
 pub mod function;
 pub mod opcode;
