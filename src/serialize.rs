@@ -52,14 +52,11 @@ impl<'a> SerCtx<'a> {
     /// sequence number (new or existing).
     fn record_object(&mut self, gc_index: usize) -> u32 {
         let next = &mut self.next_seq;
-        *self
-            .object_map
-            .entry(gc_index)
-            .or_insert_with(|| {
-                let seq = *next;
-                *next += 1;
-                seq
-            })
+        *self.object_map.entry(gc_index).or_insert_with(|| {
+            let seq = *next;
+            *next += 1;
+            seq
+        })
     }
 }
 

@@ -1,7 +1,7 @@
 use core::fmt;
 
-use crate::value::Value;
 use crate::io::HandleId;
+use crate::value::Value;
 
 /// Bytecode instruction for the Pausible stack VM.
 ///
@@ -65,25 +65,38 @@ pub enum OpCode {
 
     // -- I/O: file --
     /// Open a file at  with the given  ("r"/"w"/"a"), push `HandleId`.
-    FileOpen { path: Value, mode: Value },
+    FileOpen {
+        path: Value,
+        mode: Value,
+    },
     /// Read from file handle, push bytes as List on stack.
     FileRead(HandleId),
     /// Write data (popped from stack) to file handle.
     FileWrite(HandleId),
     /// Seek file handle to , push the resulting position.
-    FileSeek { handle: HandleId, offset: Value },
+    FileSeek {
+        handle: HandleId,
+        offset: Value,
+    },
     /// Close file handle, push success bool.
     FileClose(HandleId),
 
     // -- I/O: TCP --
-    TcpConnect { addr: Value },
+    TcpConnect {
+        addr: Value,
+    },
     TcpRead(HandleId),
     TcpWrite(HandleId),
     TcpClose(HandleId),
 
     // -- I/O: HTTP --
-    HttpGet { url: Value },
-    HttpPost { url: Value, body: Value },
+    HttpGet {
+        url: Value,
+    },
+    HttpPost {
+        url: Value,
+        body: Value,
+    },
 
     // -- I/O: standard streams --
     StdinRead,
@@ -91,7 +104,9 @@ pub enum OpCode {
     StderrWrite,
 
     // -- I/O: timer --
-    TimerSleep { ms: Value },
+    TimerSleep {
+        ms: Value,
+    },
 }
 
 impl OpCode {
@@ -208,21 +223,48 @@ mod tests {
         assert_eq!(OpCode::Return.mnemonic(), "ret");
         assert_eq!(OpCode::Halt.mnemonic(), "halt");
         assert_eq!(OpCode::Yield.mnemonic(), "yield");
-        assert_eq!(OpCode::FileOpen { path: Value::Null, mode: Value::Null }.mnemonic(), "file_open");
+        assert_eq!(
+            OpCode::FileOpen {
+                path: Value::Null,
+                mode: Value::Null
+            }
+            .mnemonic(),
+            "file_open"
+        );
         assert_eq!(OpCode::FileRead(HandleId(0)).mnemonic(), "file_read");
         assert_eq!(OpCode::FileWrite(HandleId(0)).mnemonic(), "file_write");
-        assert_eq!(OpCode::FileSeek { handle: HandleId(0), offset: Value::Null }.mnemonic(), "file_seek");
+        assert_eq!(
+            OpCode::FileSeek {
+                handle: HandleId(0),
+                offset: Value::Null
+            }
+            .mnemonic(),
+            "file_seek"
+        );
         assert_eq!(OpCode::FileClose(HandleId(0)).mnemonic(), "file_close");
-        assert_eq!(OpCode::TcpConnect { addr: Value::Null }.mnemonic(), "tcp_connect");
+        assert_eq!(
+            OpCode::TcpConnect { addr: Value::Null }.mnemonic(),
+            "tcp_connect"
+        );
         assert_eq!(OpCode::TcpRead(HandleId(0)).mnemonic(), "tcp_read");
         assert_eq!(OpCode::TcpWrite(HandleId(0)).mnemonic(), "tcp_write");
         assert_eq!(OpCode::TcpClose(HandleId(0)).mnemonic(), "tcp_close");
         assert_eq!(OpCode::HttpGet { url: Value::Null }.mnemonic(), "http_get");
-        assert_eq!(OpCode::HttpPost { url: Value::Null, body: Value::Null }.mnemonic(), "http_post");
+        assert_eq!(
+            OpCode::HttpPost {
+                url: Value::Null,
+                body: Value::Null
+            }
+            .mnemonic(),
+            "http_post"
+        );
         assert_eq!(OpCode::StdinRead.mnemonic(), "stdin_read");
         assert_eq!(OpCode::StdoutWrite.mnemonic(), "stdout_write");
         assert_eq!(OpCode::StderrWrite.mnemonic(), "stderr_write");
-        assert_eq!(OpCode::TimerSleep { ms: Value::Null }.mnemonic(), "timer_sleep");
+        assert_eq!(
+            OpCode::TimerSleep { ms: Value::Null }.mnemonic(),
+            "timer_sleep"
+        );
     }
 
     #[test]
@@ -234,15 +276,62 @@ mod tests {
         assert_eq!(format!("{}", OpCode::Load(2)), "load 2");
         assert_eq!(format!("{}", OpCode::Store(3)), "store 3");
         assert_eq!(format!("{}", OpCode::Call(7)), "call 7");
-        assert_eq!(format!("{}", OpCode::FileOpen { path: Value::Int(1), mode: Value::Int(2) }), "file_open 1 2");
+        assert_eq!(
+            format!(
+                "{}",
+                OpCode::FileOpen {
+                    path: Value::Int(1),
+                    mode: Value::Int(2)
+                }
+            ),
+            "file_open 1 2"
+        );
         assert_eq!(format!("{}", OpCode::FileRead(HandleId(3))), "file_read #3");
-        assert_eq!(format!("{}", OpCode::FileWrite(HandleId(4))), "file_write #4");
-        assert_eq!(format!("{}", OpCode::FileSeek { handle: HandleId(5), offset: Value::Int(100) }), "file_seek #5 100");
-        assert_eq!(format!("{}", OpCode::FileClose(HandleId(6))), "file_close #6");
-        assert_eq!(format!("{}", OpCode::TcpConnect { addr: Value::Null }), "tcp_connect null");
-        assert_eq!(format!("{}", OpCode::HttpGet { url: Value::Null }), "http_get null");
-        assert_eq!(format!("{}", OpCode::HttpPost { url: Value::Null, body: Value::Null }), "http_post null null");
-        assert_eq!(format!("{}", OpCode::TimerSleep { ms: Value::Int(500) }), "timer_sleep 500");
+        assert_eq!(
+            format!("{}", OpCode::FileWrite(HandleId(4))),
+            "file_write #4"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                OpCode::FileSeek {
+                    handle: HandleId(5),
+                    offset: Value::Int(100)
+                }
+            ),
+            "file_seek #5 100"
+        );
+        assert_eq!(
+            format!("{}", OpCode::FileClose(HandleId(6))),
+            "file_close #6"
+        );
+        assert_eq!(
+            format!("{}", OpCode::TcpConnect { addr: Value::Null }),
+            "tcp_connect null"
+        );
+        assert_eq!(
+            format!("{}", OpCode::HttpGet { url: Value::Null }),
+            "http_get null"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                OpCode::HttpPost {
+                    url: Value::Null,
+                    body: Value::Null
+                }
+            ),
+            "http_post null null"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                OpCode::TimerSleep {
+                    ms: Value::Int(500)
+                }
+            ),
+            "timer_sleep 500"
+        );
         assert_eq!(format!("{}", OpCode::StdinRead), "stdin_read");
     }
 
@@ -261,25 +350,50 @@ mod tests {
     fn total_instruction_count() {
         let variants: &[OpCode] = &[
             // -- stack --
-            OpCode::Push(Value::Null), OpCode::Pop, OpCode::Dup,
+            OpCode::Push(Value::Null),
+            OpCode::Pop,
+            OpCode::Dup,
             // -- arithmetic --
-            OpCode::Add, OpCode::Sub, OpCode::Mul, OpCode::Div, OpCode::Mod, OpCode::Neg,
+            OpCode::Add,
+            OpCode::Sub,
+            OpCode::Mul,
+            OpCode::Div,
+            OpCode::Mod,
+            OpCode::Neg,
             // -- comparison --
-            OpCode::Eq, OpCode::Neq, OpCode::Lt, OpCode::Gt, OpCode::Lte, OpCode::Gte,
+            OpCode::Eq,
+            OpCode::Neq,
+            OpCode::Lt,
+            OpCode::Gt,
+            OpCode::Lte,
+            OpCode::Gte,
             // -- logical --
-            OpCode::And, OpCode::Or, OpCode::Not,
+            OpCode::And,
+            OpCode::Or,
+            OpCode::Not,
             // -- control flow --
-            OpCode::Jump(0), OpCode::JumpIfTrue(0), OpCode::JumpIfFalse(0),
+            OpCode::Jump(0),
+            OpCode::JumpIfTrue(0),
+            OpCode::JumpIfFalse(0),
             // -- locals --
-            OpCode::Load(0), OpCode::Store(0),
+            OpCode::Load(0),
+            OpCode::Store(0),
             // -- functions --
-            OpCode::Call(0), OpCode::Return,
-            OpCode::Halt, OpCode::Yield,
+            OpCode::Call(0),
+            OpCode::Return,
+            OpCode::Halt,
+            OpCode::Yield,
             // -- I/O: file (5) --
-            OpCode::FileOpen { path: Value::Null, mode: Value::Null },
+            OpCode::FileOpen {
+                path: Value::Null,
+                mode: Value::Null,
+            },
             OpCode::FileRead(HandleId(0)),
             OpCode::FileWrite(HandleId(0)),
-            OpCode::FileSeek { handle: HandleId(0), offset: Value::Null },
+            OpCode::FileSeek {
+                handle: HandleId(0),
+                offset: Value::Null,
+            },
             OpCode::FileClose(HandleId(0)),
             // -- I/O: TCP (4) --
             OpCode::TcpConnect { addr: Value::Null },
@@ -288,9 +402,14 @@ mod tests {
             OpCode::TcpClose(HandleId(0)),
             // -- I/O: HTTP (2) --
             OpCode::HttpGet { url: Value::Null },
-            OpCode::HttpPost { url: Value::Null, body: Value::Null },
+            OpCode::HttpPost {
+                url: Value::Null,
+                body: Value::Null,
+            },
             // -- I/O: std streams (3) --
-            OpCode::StdinRead, OpCode::StdoutWrite, OpCode::StderrWrite,
+            OpCode::StdinRead,
+            OpCode::StdoutWrite,
+            OpCode::StderrWrite,
             // -- I/O: timer (1) --
             OpCode::TimerSleep { ms: Value::Null },
         ];

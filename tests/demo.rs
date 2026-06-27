@@ -22,23 +22,23 @@ fn fibonacci_recursive() {
         "fib",
         1,
         vec![
-            OpCode::Load(0),              // 0: push n
-            OpCode::Push(Value::Int(1)),  // 1: push 1
-            OpCode::Lte,                  // 2: n <= 1?
-            OpCode::JumpIfTrue(14),       // 3: if true → base case
-            OpCode::Load(0),              // 4: push n
-            OpCode::Push(Value::Int(1)),  // 5: push 1
-            OpCode::Sub,                  // 6: n-1
-            OpCode::Call(1),              // 7: fib(n-1)
-            OpCode::Load(0),              // 8: push n
-            OpCode::Push(Value::Int(2)),  // 9: push 2
-            OpCode::Sub,                  // 10: n-2
-            OpCode::Call(1),              // 11: fib(n-2)
-            OpCode::Add,                  // 12: fib(n-1)+fib(n-2)
-            OpCode::Return,               // 13: return
+            OpCode::Load(0),             // 0: push n
+            OpCode::Push(Value::Int(1)), // 1: push 1
+            OpCode::Lte,                 // 2: n <= 1?
+            OpCode::JumpIfTrue(14),      // 3: if true → base case
+            OpCode::Load(0),             // 4: push n
+            OpCode::Push(Value::Int(1)), // 5: push 1
+            OpCode::Sub,                 // 6: n-1
+            OpCode::Call(1),             // 7: fib(n-1)
+            OpCode::Load(0),             // 8: push n
+            OpCode::Push(Value::Int(2)), // 9: push 2
+            OpCode::Sub,                 // 10: n-2
+            OpCode::Call(1),             // 11: fib(n-2)
+            OpCode::Add,                 // 12: fib(n-1)+fib(n-2)
+            OpCode::Return,              // 13: return
             // base case:
-            OpCode::Load(0),              // 14: push n
-            OpCode::Return,               // 15: return n
+            OpCode::Load(0), // 14: push n
+            OpCode::Return,  // 15: return n
         ],
         1,
     );
@@ -48,7 +48,7 @@ fn fibonacci_recursive() {
         0,
         vec![
             OpCode::Push(Value::Int(10)),
-            OpCode::Call(1),  // fib(10)
+            OpCode::Call(1), // fib(10)
             OpCode::Halt,
         ],
         0,
@@ -68,20 +68,20 @@ fn factorial_recursive() {
         "fact",
         1,
         vec![
-            OpCode::Load(0),              // 0: push n
-            OpCode::Push(Value::Int(1)),  // 1: push 1
-            OpCode::Lte,                  // 2: n <= 1?
-            OpCode::JumpIfTrue(11),       // 3: if true → base case
-            OpCode::Load(0),              // 4: push n
-            OpCode::Load(0),              // 5: push n
-            OpCode::Push(Value::Int(1)),  // 6: push 1
-            OpCode::Sub,                  // 7: n-1
-            OpCode::Call(1),              // 8: fact(n-1)
-            OpCode::Mul,                  // 9: n * fact(n-1)
-            OpCode::Return,               // 10: return
+            OpCode::Load(0),             // 0: push n
+            OpCode::Push(Value::Int(1)), // 1: push 1
+            OpCode::Lte,                 // 2: n <= 1?
+            OpCode::JumpIfTrue(11),      // 3: if true → base case
+            OpCode::Load(0),             // 4: push n
+            OpCode::Load(0),             // 5: push n
+            OpCode::Push(Value::Int(1)), // 6: push 1
+            OpCode::Sub,                 // 7: n-1
+            OpCode::Call(1),             // 8: fact(n-1)
+            OpCode::Mul,                 // 9: n * fact(n-1)
+            OpCode::Return,              // 10: return
             // base case:
-            OpCode::Push(Value::Int(1)),  // 11: push 1
-            OpCode::Return,               // 12: return 1
+            OpCode::Push(Value::Int(1)), // 11: push 1
+            OpCode::Return,              // 12: return 1
         ],
         1,
     );
@@ -91,7 +91,7 @@ fn factorial_recursive() {
         0,
         vec![
             OpCode::Push(Value::Int(5)),
-            OpCode::Call(1),  // fact(5)
+            OpCode::Call(1), // fact(5)
             OpCode::Halt,
         ],
         0,
@@ -112,27 +112,27 @@ fn loop_sum() {
         "sum",
         1,
         vec![
-            OpCode::Push(Value::Int(0)),  // 0: push 0
-            OpCode::Store(1),             // 1: result = 0
-            OpCode::Load(0),              // 2: push n
-            OpCode::Store(2),             // 3: i = n
+            OpCode::Push(Value::Int(0)), // 0: push 0
+            OpCode::Store(1),            // 1: result = 0
+            OpCode::Load(0),             // 2: push n
+            OpCode::Store(2),            // 3: i = n
             // loop:
-            OpCode::Load(2),              // 4: push i
-            OpCode::Push(Value::Int(0)),  // 5: push 0
-            OpCode::Gt,                   // 6: i > 0?
-            OpCode::JumpIfFalse(17),      // 7: if false → done
-            OpCode::Load(1),              // 8: push result
-            OpCode::Load(2),              // 9: push i
-            OpCode::Add,                  // 10: result + i
-            OpCode::Store(1),             // 11: result = result + i
-            OpCode::Load(2),              // 12: push i
-            OpCode::Push(Value::Int(1)),  // 13: push 1
-            OpCode::Sub,                  // 14: i - 1
-            OpCode::Store(2),             // 15: i = i - 1
-            OpCode::Jump(4),              // 16: loop back
+            OpCode::Load(2),             // 4: push i
+            OpCode::Push(Value::Int(0)), // 5: push 0
+            OpCode::Gt,                  // 6: i > 0?
+            OpCode::JumpIfFalse(17),     // 7: if false → done
+            OpCode::Load(1),             // 8: push result
+            OpCode::Load(2),             // 9: push i
+            OpCode::Add,                 // 10: result + i
+            OpCode::Store(1),            // 11: result = result + i
+            OpCode::Load(2),             // 12: push i
+            OpCode::Push(Value::Int(1)), // 13: push 1
+            OpCode::Sub,                 // 14: i - 1
+            OpCode::Store(2),            // 15: i = i - 1
+            OpCode::Jump(4),             // 16: loop back
             // done:
-            OpCode::Load(1),              // 17: push result
-            OpCode::Return,               // 18: return
+            OpCode::Load(1), // 17: push result
+            OpCode::Return,  // 18: return
         ],
         3,
     );
@@ -142,7 +142,7 @@ fn loop_sum() {
         0,
         vec![
             OpCode::Push(Value::Int(5)),
-            OpCode::Call(1),  // sum(5)
+            OpCode::Call(1), // sum(5)
             OpCode::Halt,
         ],
         0,
@@ -161,18 +161,18 @@ fn conditional_abs() {
         "abs",
         1,
         vec![
-            OpCode::Load(0),              // 0: push n
-            OpCode::Push(Value::Int(0)),  // 1: push 0
-            OpCode::Gte,                  // 2: n >= 0?
-            OpCode::JumpIfTrue(7),        // 3: if true → if branch
+            OpCode::Load(0),             // 0: push n
+            OpCode::Push(Value::Int(0)), // 1: push 0
+            OpCode::Gte,                 // 2: n >= 0?
+            OpCode::JumpIfTrue(7),       // 3: if true → if branch
             // else:
-            OpCode::Load(0),              // 4: push n
-            OpCode::Neg,                  // 5: -n
-            OpCode::Jump(8),              // 6: skip if branch
+            OpCode::Load(0), // 4: push n
+            OpCode::Neg,     // 5: -n
+            OpCode::Jump(8), // 6: skip if branch
             // if:
-            OpCode::Load(0),              // 7: push n
+            OpCode::Load(0), // 7: push n
             // return:
-            OpCode::Return,               // 8: return
+            OpCode::Return, // 8: return
         ],
         1,
     );
@@ -182,7 +182,7 @@ fn conditional_abs() {
         0,
         vec![
             OpCode::Push(Value::Int(-7)),
-            OpCode::Call(1),  // abs(-7)
+            OpCode::Call(1), // abs(-7)
             OpCode::Halt,
         ],
         0,
@@ -193,7 +193,7 @@ fn conditional_abs() {
         0,
         vec![
             OpCode::Push(Value::Int(3)),
-            OpCode::Call(1),  // abs(3)
+            OpCode::Call(1), // abs(3)
             OpCode::Halt,
         ],
         0,
@@ -215,9 +215,9 @@ fn nested_compose() {
         "square",
         1,
         vec![
-            OpCode::Load(0),   // x
-            OpCode::Load(0),   // x
-            OpCode::Mul,       // x * x
+            OpCode::Load(0), // x
+            OpCode::Load(0), // x
+            OpCode::Mul,     // x * x
             OpCode::Return,
         ],
         1,
@@ -229,7 +229,7 @@ fn nested_compose() {
         vec![
             OpCode::Load(0),
             OpCode::Push(Value::Int(2)),
-            OpCode::Mul,       // x * 2
+            OpCode::Mul, // x * 2
             OpCode::Return,
         ],
         1,
@@ -240,8 +240,8 @@ fn nested_compose() {
         0,
         vec![
             OpCode::Push(Value::Int(3)),
-            OpCode::Call(2),   // double(3) → 6
-            OpCode::Call(1),   // square(6) → 36
+            OpCode::Call(2), // double(3) → 6
+            OpCode::Call(1), // square(6) → 36
             OpCode::Halt,
         ],
         0,
@@ -301,7 +301,10 @@ fn yield_snapshot_resume_roundtrip() {
     restored.step().unwrap(); // push 3
     restored.step().unwrap(); // halt
     assert!(!restored.running);
-    assert_eq!(restored.stack, &[Value::Int(1), Value::Int(2), Value::Int(3)]);
+    assert_eq!(
+        restored.stack,
+        &[Value::Int(1), Value::Int(2), Value::Int(3)]
+    );
 
     // Also test run() stops at first yield
     let mut vm3 = VM::new();
@@ -315,9 +318,9 @@ fn yield_snapshot_resume_roundtrip() {
 
 #[test]
 fn resume_from_file_roundtrip() {
-    use pausible::snapshot::Snapshot;
     use pausible::function::Function;
     use pausible::opcode::OpCode;
+    use pausible::snapshot::Snapshot;
     use pausible::value::Value;
     use pausible::vm::VM;
 
@@ -358,9 +361,9 @@ fn resume_from_file_roundtrip() {
 
 #[test]
 fn resume_with_string_heap_objects() {
-    use pausible::snapshot::Snapshot;
     use pausible::function::Function;
     use pausible::opcode::OpCode;
+    use pausible::snapshot::Snapshot;
     use pausible::value::Value;
     use pausible::vm::VM;
 
@@ -369,9 +372,9 @@ fn resume_with_string_heap_objects() {
         "main",
         0,
         vec![
-            OpCode::Push(Value::Int(0)),   // placeholder, replaced below
+            OpCode::Push(Value::Int(0)), // placeholder, replaced below
             OpCode::Yield,
-            OpCode::Push(Value::Int(0)),   // placeholder
+            OpCode::Push(Value::Int(0)), // placeholder
             OpCode::Halt,
         ],
         0,
@@ -414,7 +417,6 @@ fn resume_with_string_heap_objects() {
     }
 }
 
-
 // -- Phase 2.7: 跨架构验证与测试 --
 
 // 斐波那契 yield 中途保存，恢复后得出正确结果
@@ -432,38 +434,38 @@ fn fibonacci_yield_midpoint_resume() {
         0,
         vec![
             // Setup: counter=5, a=0, b=1
-            OpCode::Push(Value::Int(5)),     // 0: counter = 5
-            OpCode::Store(0),                // 1
-            OpCode::Push(Value::Int(0)),     // 2: a = 0
-            OpCode::Store(1),                // 3
-            OpCode::Push(Value::Int(1)),     // 4: b = 1
-            OpCode::Store(2),                // 5
+            OpCode::Push(Value::Int(5)), // 0: counter = 5
+            OpCode::Store(0),            // 1
+            OpCode::Push(Value::Int(0)), // 2: a = 0
+            OpCode::Store(1),            // 3
+            OpCode::Push(Value::Int(1)), // 4: b = 1
+            OpCode::Store(2),            // 5
             // loop:
-            OpCode::Load(0),                 // 6: push counter
-            OpCode::Push(Value::Int(0)),     // 7
-            OpCode::Eq,                      // 8: counter == 0?
-            OpCode::JumpIfTrue(28),          // 9: if so, goto end
-            OpCode::Load(0),                 // 10: push counter
-            OpCode::Push(Value::Int(3)),     // 11
-            OpCode::Eq,                      // 12: counter == 3?
-            OpCode::JumpIfFalse(15),         // 13: skip yield
-            OpCode::Yield,                   // 14: yield at midpoint
-            OpCode::Load(1),                 // 15: push a
-            OpCode::Load(2),                 // 16: push b
-            OpCode::Add,                     // 17: c = a+b
-            OpCode::Store(3),                // 18: local[3] = c
-            OpCode::Load(2),                 // 19: push b
-            OpCode::Store(1),                // 20: a = b
-            OpCode::Load(3),                 // 21: push c
-            OpCode::Store(2),                // 22: b = c
-            OpCode::Load(0),                 // 23: push counter
-            OpCode::Push(Value::Int(1)),     // 24
-            OpCode::Sub,                     // 25: counter - 1
-            OpCode::Store(0),                // 26: counter = counter-1
-            OpCode::Jump(6),                 // 27: loop
+            OpCode::Load(0),             // 6: push counter
+            OpCode::Push(Value::Int(0)), // 7
+            OpCode::Eq,                  // 8: counter == 0?
+            OpCode::JumpIfTrue(28),      // 9: if so, goto end
+            OpCode::Load(0),             // 10: push counter
+            OpCode::Push(Value::Int(3)), // 11
+            OpCode::Eq,                  // 12: counter == 3?
+            OpCode::JumpIfFalse(15),     // 13: skip yield
+            OpCode::Yield,               // 14: yield at midpoint
+            OpCode::Load(1),             // 15: push a
+            OpCode::Load(2),             // 16: push b
+            OpCode::Add,                 // 17: c = a+b
+            OpCode::Store(3),            // 18: local[3] = c
+            OpCode::Load(2),             // 19: push b
+            OpCode::Store(1),            // 20: a = b
+            OpCode::Load(3),             // 21: push c
+            OpCode::Store(2),            // 22: b = c
+            OpCode::Load(0),             // 23: push counter
+            OpCode::Push(Value::Int(1)), // 24
+            OpCode::Sub,                 // 25: counter - 1
+            OpCode::Store(0),            // 26: counter = counter-1
+            OpCode::Jump(6),             // 27: loop
             // end:
-            OpCode::Load(2),                 // 28: push result (b)
-            OpCode::Halt,                    // 29
+            OpCode::Load(2), // 28: push result (b)
+            OpCode::Halt,    // 29
         ],
         4, // 4 locals
     );
@@ -501,32 +503,32 @@ fn factorial_nested_yields() {
         0,
         vec![
             // Setup: counter=5, result=1
-            OpCode::Push(Value::Int(5)),     // 0
-            OpCode::Store(0),                // 1: counter = 5
-            OpCode::Push(Value::Int(1)),     // 2
-            OpCode::Store(1),                // 3: result = 1
+            OpCode::Push(Value::Int(5)), // 0
+            OpCode::Store(0),            // 1: counter = 5
+            OpCode::Push(Value::Int(1)), // 2
+            OpCode::Store(1),            // 3: result = 1
             // loop:
-            OpCode::Load(0),                 // 4: push counter
-            OpCode::Push(Value::Int(0)),     // 5
-            OpCode::Eq,                      // 6: counter == 0?
-            OpCode::JumpIfTrue(22),          // 7: yes -> end
-            OpCode::Load(1),                 // 8: push result
-            OpCode::Load(0),                 // 9: push counter
-            OpCode::Mul,                     // 10: result * counter
-            OpCode::Store(1),                // 11: result = result * counter
-            OpCode::Load(0),                 // 12: push counter
-            OpCode::Push(Value::Int(1)),     // 13
-            OpCode::Sub,                     // 14: counter - 1
-            OpCode::Store(0),                // 15: counter = counter - 1
-            OpCode::Load(0),                 // 16: push counter
-            OpCode::Push(Value::Int(0)),     // 17: push 0
-            OpCode::Eq,                      // 18: counter == 0?
-            OpCode::JumpIfTrue(4),           // 19: if counter==0, skip yield, loop back
-            OpCode::Yield,                   // 20: yield only when counter > 0
-            OpCode::Jump(4),                 // 21: loop back
+            OpCode::Load(0),             // 4: push counter
+            OpCode::Push(Value::Int(0)), // 5
+            OpCode::Eq,                  // 6: counter == 0?
+            OpCode::JumpIfTrue(22),      // 7: yes -> end
+            OpCode::Load(1),             // 8: push result
+            OpCode::Load(0),             // 9: push counter
+            OpCode::Mul,                 // 10: result * counter
+            OpCode::Store(1),            // 11: result = result * counter
+            OpCode::Load(0),             // 12: push counter
+            OpCode::Push(Value::Int(1)), // 13
+            OpCode::Sub,                 // 14: counter - 1
+            OpCode::Store(0),            // 15: counter = counter - 1
+            OpCode::Load(0),             // 16: push counter
+            OpCode::Push(Value::Int(0)), // 17: push 0
+            OpCode::Eq,                  // 18: counter == 0?
+            OpCode::JumpIfTrue(4),       // 19: if counter==0, skip yield, loop back
+            OpCode::Yield,               // 20: yield only when counter > 0
+            OpCode::Jump(4),             // 21: loop back
             // end:
-            OpCode::Load(1),                 // 22: push result
-            OpCode::Halt,                    // 23
+            OpCode::Load(1), // 22: push result
+            OpCode::Halt,    // 23
         ],
         2,
     );
@@ -583,32 +585,32 @@ fn loop_yield_per_iteration() {
         "sum",
         0,
         vec![
-            OpCode::Push(Value::Int(5)),     // 0
-            OpCode::Store(0),                // 1: i = 5
-            OpCode::Push(Value::Int(0)),     // 2
-            OpCode::Store(1),                // 3: sum = 0
+            OpCode::Push(Value::Int(5)), // 0
+            OpCode::Store(0),            // 1: i = 5
+            OpCode::Push(Value::Int(0)), // 2
+            OpCode::Store(1),            // 3: sum = 0
             // loop:
-            OpCode::Load(0),                 // 4: push i
-            OpCode::Push(Value::Int(0)),     // 5
-            OpCode::Eq,                      // 6: i == 0?
-            OpCode::JumpIfTrue(22),          // 7: yes -> end
-            OpCode::Load(1),                 // 8: push sum
-            OpCode::Load(0),                 // 9: push i
-            OpCode::Add,                     // 10: sum + i
-            OpCode::Store(1),                // 11: sum = sum + i
-            OpCode::Load(0),                 // 12: push i
-            OpCode::Push(Value::Int(1)),     // 13
-            OpCode::Sub,                     // 14: i - 1
-            OpCode::Store(0),                // 15: i = i - 1
-            OpCode::Load(0),                 // 16: push counter
-            OpCode::Push(Value::Int(0)),     // 17: push 0
-            OpCode::Eq,                      // 18: i == 0?
-            OpCode::JumpIfTrue(4),           // 19: if i==0, skip yield, loop back
-            OpCode::Yield,                   // 20: yield only when i > 0
-            OpCode::Jump(4),                 // 21: loop back
+            OpCode::Load(0),             // 4: push i
+            OpCode::Push(Value::Int(0)), // 5
+            OpCode::Eq,                  // 6: i == 0?
+            OpCode::JumpIfTrue(22),      // 7: yes -> end
+            OpCode::Load(1),             // 8: push sum
+            OpCode::Load(0),             // 9: push i
+            OpCode::Add,                 // 10: sum + i
+            OpCode::Store(1),            // 11: sum = sum + i
+            OpCode::Load(0),             // 12: push i
+            OpCode::Push(Value::Int(1)), // 13
+            OpCode::Sub,                 // 14: i - 1
+            OpCode::Store(0),            // 15: i = i - 1
+            OpCode::Load(0),             // 16: push counter
+            OpCode::Push(Value::Int(0)), // 17: push 0
+            OpCode::Eq,                  // 18: i == 0?
+            OpCode::JumpIfTrue(4),       // 19: if i==0, skip yield, loop back
+            OpCode::Yield,               // 20: yield only when i > 0
+            OpCode::Jump(4),             // 21: loop back
             // end:
-            OpCode::Load(1),                 // 22: push sum
-            OpCode::Halt,                    // 23
+            OpCode::Load(1), // 22: push sum
+            OpCode::Halt,    // 23
         ],
         2,
     );

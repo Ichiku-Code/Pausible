@@ -187,7 +187,9 @@ mod tests {
 
     #[test]
     fn stdin_is_always_cached() {
-        let h = IoHandle::Stdin { buffer: vec![1, 2, 3] };
+        let h = IoHandle::Stdin {
+            buffer: vec![1, 2, 3],
+        };
         assert_eq!(h.strategy(), IoStrategy::Cached);
         assert_eq!(h.kind_name(), "Stdin");
     }
@@ -242,10 +244,39 @@ mod tests {
     #[test]
     fn all_kind_names() {
         let kinds: &[(&str, IoHandle)] = &[
-            ("File", IoHandle::File { path: "a".into(), mode: FileMode::Read, position: 0, strategy: IoStrategy::Seek }),
-            ("TcpStream", IoHandle::TcpStream { addr: "x".into(), strategy: IoStrategy::Replay }),
-            ("HttpConnection", IoHandle::HttpConnection { url: "x".into(), method: HttpMethod::Get, body: None, last_response: None, strategy: IoStrategy::Replay }),
-            ("Timer", IoHandle::Timer { ms: 0, strategy: IoStrategy::Replay }),
+            (
+                "File",
+                IoHandle::File {
+                    path: "a".into(),
+                    mode: FileMode::Read,
+                    position: 0,
+                    strategy: IoStrategy::Seek,
+                },
+            ),
+            (
+                "TcpStream",
+                IoHandle::TcpStream {
+                    addr: "x".into(),
+                    strategy: IoStrategy::Replay,
+                },
+            ),
+            (
+                "HttpConnection",
+                IoHandle::HttpConnection {
+                    url: "x".into(),
+                    method: HttpMethod::Get,
+                    body: None,
+                    last_response: None,
+                    strategy: IoStrategy::Replay,
+                },
+            ),
+            (
+                "Timer",
+                IoHandle::Timer {
+                    ms: 0,
+                    strategy: IoStrategy::Replay,
+                },
+            ),
             ("Stdin", IoHandle::Stdin { buffer: vec![] }),
             ("Stdout", IoHandle::Stdout { buffer: vec![] }),
             ("Stderr", IoHandle::Stderr { buffer: vec![] }),

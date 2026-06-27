@@ -5,11 +5,11 @@
 use core::fmt;
 
 use crate::function::Function;
-use crate::opcode::OpCode;
-use crate::heap::{Heap, Gc, ListObj, StringObj};
+use crate::heap::{Gc, Heap, ListObj, StringObj};
 use crate::io::{HandleId, IoHandle};
-use std::collections::HashMap;
+use crate::opcode::OpCode;
 use crate::value::{TypeError, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeapError {
@@ -162,24 +162,31 @@ impl VM {
 
     /// Borrow a heap string by handle.
     pub fn get_string(&self, gc: Gc<StringObj>) -> Result<&StringObj, VmError> {
-        self.heap.get(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+        self.heap
+            .get(gc)
+            .ok_or(VmError::HeapError(HeapError::InvalidHandle))
     }
 
     /// Mutably borrow a heap string.
     pub fn get_string_mut(&mut self, gc: Gc<StringObj>) -> Result<&mut StringObj, VmError> {
-        self.heap.get_mut(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+        self.heap
+            .get_mut(gc)
+            .ok_or(VmError::HeapError(HeapError::InvalidHandle))
     }
 
     /// Borrow a heap list by handle.
     pub fn get_list(&self, gc: Gc<ListObj>) -> Result<&ListObj, VmError> {
-        self.heap.get(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+        self.heap
+            .get(gc)
+            .ok_or(VmError::HeapError(HeapError::InvalidHandle))
     }
 
     /// Mutably borrow a heap list.
     pub fn get_list_mut(&mut self, gc: Gc<ListObj>) -> Result<&mut ListObj, VmError> {
-        self.heap.get_mut(gc).ok_or(VmError::HeapError(HeapError::InvalidHandle))
+        self.heap
+            .get_mut(gc)
+            .ok_or(VmError::HeapError(HeapError::InvalidHandle))
     }
-
 
     // -- I/O handles --
 
@@ -394,8 +401,7 @@ impl VM {
 
             // -- locals --
             OpCode::Load(idx) => {
-                let val = self
-                    .frames[frame_idx]
+                let val = self.frames[frame_idx]
                     .locals
                     .get(idx)
                     .ok_or(VmError::LocalOutOfBounds(idx))?;
@@ -403,8 +409,7 @@ impl VM {
             }
             OpCode::Store(idx) => {
                 let val = self.pop()?;
-                let slot = self
-                    .frames[frame_idx]
+                let slot = self.frames[frame_idx]
                     .locals
                     .get_mut(idx)
                     .ok_or(VmError::LocalOutOfBounds(idx))?;
@@ -451,19 +456,19 @@ impl VM {
                 let mode_val = mode;
                 let path_val = path;
                 let path_str = match &path_val {
-                    Value::String(gc) => {
-                        self.heap.get(*gc).map(|s| s.data.clone()).unwrap_or_default()
-                    }
+                    Value::String(gc) => self
+                        .heap
+                        .get(*gc)
+                        .map(|s| s.data.clone())
+                        .unwrap_or_default(),
                     _ => path_val.to_string(),
                 };
                 let fmode = match &mode_val {
-                    Value::String(gc) => {
-                        match self.heap.get(*gc).map(|s| s.data.as_str()) {
-                            Some("w" | "W") => crate::io::FileMode::Write,
-                            Some("a" | "A") => crate::io::FileMode::Append,
-                            _ => crate::io::FileMode::Read,
-                        }
-                    }
+                    Value::String(gc) => match self.heap.get(*gc).map(|s| s.data.as_str()) {
+                        Some("w" | "W") => crate::io::FileMode::Write,
+                        Some("a" | "A") => crate::io::FileMode::Append,
+                        _ => crate::io::FileMode::Read,
+                    },
                     _ => crate::io::FileMode::Read,
                 };
                 let handle = IoHandle::File {
@@ -550,13 +555,11 @@ impl VM {
             Some(IoHandle::File { path, .. }) => path.clone(),
             _ => return Ok(Value::Null),
         };
-        let mut file = std::fs::File::open(&path).map_err(|_e| {
-            VmError::HeapError(HeapError::InvalidHandle)
-        })?;
+        let mut file = std::fs::File::open(&path)
+            .map_err(|_e| VmError::HeapError(HeapError::InvalidHandle))?;
         let mut buf = Vec::new();
-        file.read_to_end(&mut buf).map_err(|_| {
-            VmError::HeapError(HeapError::InvalidHandle)
-        })?;
+        file.read_to_end(&mut buf)
+            .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
         // Convert bytes to a List of Ints
         let elements: Vec<Value> = buf.into_iter().map(|b| Value::Int(i64::from(b))).collect();
         let gc = self.heap.alloc_list(elements);
@@ -576,15 +579,14 @@ impl VM {
             .truncate(true)
             .open(&path)
             .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
-        file.write_all(&bytes).map_err(|_| {
-            VmError::HeapError(HeapError::InvalidHandle)
-        })?;
+        file.write_all(&bytes)
+            .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
         Ok(bytes.len())
     }
 
     fn seek_file_handle(&mut self, h: HandleId, offset: &Value) -> u64 {
         let off = match offset {
-#[allow(clippy::cast_sign_loss)]
+            #[allow(clippy::cast_sign_loss)]
             Value::Int(n) => *n as u64,
             _ => 0,
         };
@@ -599,7 +601,8 @@ impl VM {
         // Find the first Stdin handle and return its buffer as a List
         for handle in self.handles.values() {
             if let IoHandle::Stdin { buffer } = handle {
-                let elements: Vec<Value> = buffer.iter().map(|&b| Value::Int(i64::from(b))).collect();
+                let elements: Vec<Value> =
+                    buffer.iter().map(|&b| Value::Int(i64::from(b))).collect();
                 let gc = self.heap.alloc_list(elements);
                 return Value::List(gc);
             }
@@ -650,10 +653,7 @@ impl VM {
         Ok(())
     }
 
-    fn unary_op(
-        &mut self,
-        op: fn(&Value) -> Result<Value, TypeError>,
-    ) -> Result<(), VmError> {
+    fn unary_op(&mut self, op: fn(&Value) -> Result<Value, TypeError>) -> Result<(), VmError> {
         let val = self.pop()?;
         let result = op(&val).map_err(VmError::TypeError)?;
         self.stack.push(result);
@@ -666,7 +666,13 @@ fn value_to_bytes(val: &Value) -> Vec<u8> {
     match val {
         Value::Int(n) => n.to_string().into_bytes(),
         Value::Float(f) => f.to_string().into_bytes(),
-        Value::Bool(b) => if *b { b"true".to_vec() } else { b"false".to_vec() },
+        Value::Bool(b) => {
+            if *b {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }
+        }
         Value::Null => b"null".to_vec(),
         Value::String(_gc) => {
             // GC-backed strings are checked at the VM-level; here we just
@@ -766,12 +772,7 @@ mod tests {
 
     #[test]
     fn dup_duplicates_top() {
-        let vm = run_code(vec![
-            OpCode::Push(Value::Int(7)),
-            OpCode::Dup,
-            OpCode::Halt,
-        ])
-        .unwrap();
+        let vm = run_code(vec![OpCode::Push(Value::Int(7)), OpCode::Dup, OpCode::Halt]).unwrap();
         assert_eq!(vm.stack, vec![Value::Int(7), Value::Int(7)]);
     }
 
@@ -950,11 +951,7 @@ mod tests {
         let main = Function::new(
             "main",
             0,
-            vec![
-                OpCode::Push(Value::Int(41)),
-                OpCode::Call(1),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::Int(41)), OpCode::Call(1), OpCode::Halt],
             0,
         );
 
@@ -1011,9 +1008,9 @@ mod tests {
         );
 
         let mut vm = VM::new();
-        vm.add_function(main);      // idx 0
+        vm.add_function(main); // idx 0
         vm.add_function(add_doubled); // idx 1
-        vm.add_function(double);    // idx 2
+        vm.add_function(double); // idx 2
         vm.prepare(0).unwrap();
         vm.run().unwrap();
 
@@ -1235,7 +1232,6 @@ mod tests {
 
     #[test]
     fn resume_continues_after_yield() {
-
         let mut vm = make_vm(vec![
             OpCode::Push(Value::Int(10)),
             OpCode::Yield,
@@ -1261,7 +1257,7 @@ mod tests {
     #[test]
     fn resume_preserves_heap_objects() {
         let mut vm = make_vm(vec![
-            OpCode::Push(Value::Null),  // placeholder
+            OpCode::Push(Value::Null), // placeholder
             OpCode::Yield,
             OpCode::Halt,
         ]);
@@ -1325,7 +1321,6 @@ mod tests {
             "resume VM error: VM halted"
         );
     }
-
 
     // -- I/O handle registry tests --
 
@@ -1448,5 +1443,4 @@ mod tests {
         // wrapping_add: next becomes 0
         assert_eq!(vm.next_handle_id, 0);
     }
-
 }

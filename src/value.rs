@@ -37,79 +37,130 @@ impl PartialEq for Value {
 
 impl Value {
     #[must_use]
-    pub fn is_int(&self) -> bool { matches!(self, Self::Int(_)) }
+    pub fn is_int(&self) -> bool {
+        matches!(self, Self::Int(_))
+    }
     #[must_use]
-    pub fn is_float(&self) -> bool { matches!(self, Self::Float(_)) }
+    pub fn is_float(&self) -> bool {
+        matches!(self, Self::Float(_))
+    }
     #[must_use]
-    pub fn is_bool(&self) -> bool { matches!(self, Self::Bool(_)) }
+    pub fn is_bool(&self) -> bool {
+        matches!(self, Self::Bool(_))
+    }
     #[must_use]
-    pub fn is_null(&self) -> bool { matches!(self, Self::Null) }
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
     #[must_use]
-    pub fn is_string(&self) -> bool { matches!(self, Self::String(_)) }
+    pub fn is_string(&self) -> bool {
+        matches!(self, Self::String(_))
+    }
     #[must_use]
-    pub fn is_list(&self) -> bool { matches!(self, Self::List(_)) }
+    pub fn is_list(&self) -> bool {
+        matches!(self, Self::List(_))
+    }
 
     #[must_use]
     pub fn as_int(&self) -> Option<i64> {
-        match self { Self::Int(v) => Some(*v), _ => None }
+        match self {
+            Self::Int(v) => Some(*v),
+            _ => None,
+        }
     }
     #[must_use]
     pub fn as_float(&self) -> Option<f64> {
-        match self { Self::Float(v) => Some(*v), _ => None }
+        match self {
+            Self::Float(v) => Some(*v),
+            _ => None,
+        }
     }
     #[must_use]
     pub fn as_bool(&self) -> Option<bool> {
-        match self { Self::Bool(v) => Some(*v), _ => None }
+        match self {
+            Self::Bool(v) => Some(*v),
+            _ => None,
+        }
     }
     #[must_use]
     pub fn as_string(&self) -> Option<Gc<StringObj>> {
-        match self { Self::String(v) => Some(*v), _ => None }
+        match self {
+            Self::String(v) => Some(*v),
+            _ => None,
+        }
     }
     #[must_use]
     pub fn as_list(&self) -> Option<Gc<ListObj>> {
-        match self { Self::List(v) => Some(*v), _ => None }
+        match self {
+            Self::List(v) => Some(*v),
+            _ => None,
+        }
     }
 
     pub fn add(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l + r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l + r)),
-            _ => Err(TypeError { op: "add", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "add",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn sub(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l - r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l - r)),
-            _ => Err(TypeError { op: "sub", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "sub",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn mul(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l * r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l * r)),
-            _ => Err(TypeError { op: "mul", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "mul",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn div(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l / r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l / r)),
-            _ => Err(TypeError { op: "div", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "div",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn modulo(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Int(l % r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Float(l % r)),
-            _ => Err(TypeError { op: "mod", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "mod",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn neg(&self) -> Result<Self, TypeError> {
         match self {
             Self::Int(v) => Ok(Self::Int(-v)),
             Self::Float(v) => Ok(Self::Float(-v)),
-            other => Err(TypeError { op: "neg", lhs: other.clone(), rhs: Value::Null }),
+            other => Err(TypeError {
+                op: "neg",
+                lhs: other.clone(),
+                rhs: Value::Null,
+            }),
         }
     }
 
@@ -121,57 +172,90 @@ impl Value {
             (Self::Null, Self::Null) => Ok(Self::Bool(true)),
             (Self::String(l), Self::String(r)) => Ok(Self::Bool(l == r)),
             (Self::List(l), Self::List(r)) => Ok(Self::Bool(l == r)),
-            _ => Err(TypeError { op: "eq", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "eq",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn neq(&self, rhs: &Self) -> Result<Self, TypeError> {
-        self.eq(rhs).map(|v| Self::Bool(!v.as_bool().unwrap_or(true)))
+        self.eq(rhs)
+            .map(|v| Self::Bool(!v.as_bool().unwrap_or(true)))
     }
     pub fn lt(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l < r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l < r)),
-            _ => Err(TypeError { op: "lt", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "lt",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn lte(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l <= r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l <= r)),
-            _ => Err(TypeError { op: "lte", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "lte",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn gt(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l > r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l > r)),
-            _ => Err(TypeError { op: "gt", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "gt",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn gte(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Int(l), Self::Int(r)) => Ok(Self::Bool(l >= r)),
             (Self::Float(l), Self::Float(r)) => Ok(Self::Bool(l >= r)),
-            _ => Err(TypeError { op: "gte", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "gte",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
 
     pub fn and(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Bool(l), Self::Bool(r)) => Ok(Self::Bool(*l && *r)),
-            _ => Err(TypeError { op: "and", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "and",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn or(&self, rhs: &Self) -> Result<Self, TypeError> {
         match (self, rhs) {
             (Self::Bool(l), Self::Bool(r)) => Ok(Self::Bool(*l || *r)),
-            _ => Err(TypeError { op: "or", lhs: self.clone(), rhs: rhs.clone() }),
+            _ => Err(TypeError {
+                op: "or",
+                lhs: self.clone(),
+                rhs: rhs.clone(),
+            }),
         }
     }
     pub fn not(&self) -> Result<Self, TypeError> {
         match self {
             Self::Bool(v) => Ok(Self::Bool(!v)),
-            other => Err(TypeError { op: "not", lhs: other.clone(), rhs: Value::Null }),
+            other => Err(TypeError {
+                op: "not",
+                lhs: other.clone(),
+                rhs: Value::Null,
+            }),
         }
     }
 
@@ -211,7 +295,11 @@ pub struct TypeError {
 
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "type error: cannot {} {} and {}", self.op, self.lhs, self.rhs)
+        write!(
+            f,
+            "type error: cannot {} {} and {}",
+            self.op, self.lhs, self.rhs
+        )
     }
 }
 
@@ -269,8 +357,14 @@ mod tests {
         let mut heap = Heap::new();
         let a = heap.alloc_string("abc".into());
         let b = heap.alloc_string("abc".into());
-        assert_eq!(Value::String(a).eq(&Value::String(a)), Ok(Value::Bool(true)));
-        assert_eq!(Value::String(a).eq(&Value::String(b)), Ok(Value::Bool(false)));
+        assert_eq!(
+            Value::String(a).eq(&Value::String(a)),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            Value::String(a).eq(&Value::String(b)),
+            Ok(Value::Bool(false))
+        );
     }
 
     #[test]

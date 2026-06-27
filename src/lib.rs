@@ -1,9 +1,9 @@
 pub mod chunk;
+pub mod function;
 pub mod heap;
 pub mod io;
-pub mod value;
-pub mod function;
 pub mod opcode;
-pub mod vm;
 pub mod serialize;
 pub mod snapshot;
+pub mod value;
+pub mod vm;

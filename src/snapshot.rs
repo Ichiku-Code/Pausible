@@ -49,7 +49,10 @@ impl core::fmt::Display for SnapshotError {
             Self::BadMagic { found } => write!(f, "bad snapshot magic: {found:02X?}"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported snapshot version: {v}"),
             Self::CodeMismatch { expected, found } => {
-                write!(f, "code hash mismatch: expected {expected:016X}, found {found:016X}")
+                write!(
+                    f,
+                    "code hash mismatch: expected {expected:016X}, found {found:016X}"
+                )
             }
             Self::IoError(msg) => write!(f, "snapshot I/O error: {msg}"),
             Self::UnexpectedEof => write!(f, "unexpected end of snapshot data"),
@@ -408,7 +411,10 @@ impl Snapshot {
                 TAG_STRING => {
                     let len = Self::read_u32(&self.heap_data, &mut hpos)? as usize;
                     let end = hpos.checked_add(len).ok_or(SnapshotError::UnexpectedEof)?;
-                    let bytes = self.heap_data.get(hpos..end).ok_or(SnapshotError::UnexpectedEof)?;
+                    let bytes = self
+                        .heap_data
+                        .get(hpos..end)
+                        .ok_or(SnapshotError::UnexpectedEof)?;
                     hpos = end;
                     let s = String::from_utf8_lossy(bytes).into_owned();
                     let gc = heap.alloc_string(s);
@@ -737,11 +743,7 @@ mod tests {
         let main = Function::new(
             "main",
             0,
-            vec![
-                OpCode::Push(Value::Int(5)),
-                OpCode::Call(1),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::Int(5)), OpCode::Call(1), OpCode::Halt],
             0,
         );
         vm.add_function(main);
@@ -772,11 +774,7 @@ mod tests {
         let main_r = Function::new(
             "main",
             0,
-            vec![
-                OpCode::Push(Value::Int(5)),
-                OpCode::Call(1),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::Int(5)), OpCode::Call(1), OpCode::Halt],
             0,
         );
         restored.add_function(main_r);
@@ -833,7 +831,9 @@ mod tests {
 
         // Restore with a wrong code hash.
         let mut restored = VM::new();
-        let err = snap.restore_into(&mut restored, 0xDEAD_BEEF_CAFE_BABE).unwrap_err();
+        let err = snap
+            .restore_into(&mut restored, 0xDEAD_BEEF_CAFE_BABE)
+            .unwrap_err();
         assert!(matches!(err, SnapshotError::CodeMismatch { .. }));
     }
 

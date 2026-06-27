@@ -4,8 +4,8 @@
 
 use core::fmt;
 
-use crate::heap::Heap;
 use crate::function::Function;
+use crate::heap::Heap;
 use crate::io::HandleId;
 use crate::opcode::OpCode;
 use crate::value::Value;
@@ -164,7 +164,10 @@ impl fmt::Display for SerError {
             Self::UnexpectedEof => write!(f, "unexpected end of data"),
             Self::UnknownOpcode(b) => write!(f, "unknown opcode byte: {b:#04X}"),
             Self::UnknownValueTag(b) => write!(f, "unknown value tag: {b:#04X}"),
-            Self::HeapValueWithoutHeap => write!(f, "cannot serialize/deserialize a heap-backed Value without a Heap context"),
+            Self::HeapValueWithoutHeap => write!(
+                f,
+                "cannot serialize/deserialize a heap-backed Value without a Heap context"
+            ),
         }
     }
 }
@@ -453,7 +456,10 @@ fn read_opcode(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<OpCode, 
         tag::FILE_SEEK => {
             let handle_raw = read_u32(data, pos)?;
             let offset = read_value(data, pos, heap)?;
-            Ok(OpCode::FileSeek { handle: HandleId(handle_raw), offset })
+            Ok(OpCode::FileSeek {
+                handle: HandleId(handle_raw),
+                offset,
+            })
         }
         tag::FILE_CLOSE => {
             let h = read_u32(data, pos)?;
@@ -524,13 +530,16 @@ pub fn deserialize_function(data: &[u8], heap: &mut Heap) -> Result<Function, Se
 }
 
 /// Internal: deserialize a function and return bytes consumed.
-fn deserialize_function_counted(data: &[u8], heap: &mut Heap) -> Result<(Function, usize), SerError> {
+fn deserialize_function_counted(
+    data: &[u8],
+    heap: &mut Heap,
+) -> Result<(Function, usize), SerError> {
     let mut pos = 0;
 
     let name_len = read_u32(data, &mut pos)? as usize;
     let end = pos + name_len;
-    let name = String::from_utf8_lossy(data.get(pos..end).ok_or(SerError::UnexpectedEof)?)
-        .into_owned();
+    let name =
+        String::from_utf8_lossy(data.get(pos..end).ok_or(SerError::UnexpectedEof)?).into_owned();
     pos += name_len;
     let arity = read_u32(data, &mut pos)? as usize;
     let num_locals = read_u32(data, &mut pos)? as usize;
@@ -726,7 +735,12 @@ mod tests {
         let f2 = Function::new(
             "add_one",
             1,
-            vec![OpCode::Load(0), OpCode::Push(Value::Int(1)), OpCode::Add, OpCode::Return],
+            vec![
+                OpCode::Load(0),
+                OpCode::Push(Value::Int(1)),
+                OpCode::Add,
+                OpCode::Return,
+            ],
             1,
         );
         let functions = vec![f1.clone(), f2.clone()];
@@ -811,10 +825,7 @@ mod tests {
         let func = Function::new(
             "str_test",
             0,
-            vec![
-                OpCode::Push(Value::String(s)),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::String(s)), OpCode::Halt],
             0,
         );
         let bytes = serialize_function(&func, &heap);
@@ -835,10 +846,7 @@ mod tests {
         let func = Function::new(
             "empty",
             0,
-            vec![
-                OpCode::Push(Value::String(s)),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::String(s)), OpCode::Halt],
             0,
         );
         let bytes = serialize_function(&func, &heap);
@@ -858,17 +866,17 @@ mod tests {
         let func = Function::new(
             "list_test",
             0,
-            vec![
-                OpCode::Push(Value::List(lst)),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::List(lst)), OpCode::Halt],
             0,
         );
         let bytes = serialize_function(&func, &heap);
         let mut restore_heap = Heap::new();
         let restored = deserialize_function(&bytes, &mut restore_heap).unwrap();
         if let OpCode::Push(Value::List(gc)) = &restored.code[0] {
-            assert_eq!(restore_heap.get(*gc).unwrap().elements, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            assert_eq!(
+                restore_heap.get(*gc).unwrap().elements,
+                vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+            );
         } else {
             panic!("expected Push(List)");
         }
@@ -882,10 +890,7 @@ mod tests {
         let func = Function::new(
             "nested",
             0,
-            vec![
-                OpCode::Push(Value::List(outer)),
-                OpCode::Halt,
-            ],
+            vec![OpCode::Push(Value::List(outer)), OpCode::Halt],
             0,
         );
         let bytes = serialize_function(&func, &heap);
@@ -895,7 +900,10 @@ mod tests {
             let outer_list = restore_heap.get(*gc).unwrap();
             assert_eq!(outer_list.elements.len(), 2);
             if let Value::List(inner_gc) = &outer_list.elements[0] {
-                assert_eq!(restore_heap.get(*inner_gc).unwrap().elements, vec![Value::Int(1), Value::Int(2)]);
+                assert_eq!(
+                    restore_heap.get(*inner_gc).unwrap().elements,
+                    vec![Value::Int(1), Value::Int(2)]
+                );
             } else {
                 panic!("expected nested List");
             }
@@ -909,8 +917,18 @@ mod tests {
         let mut heap = Heap::new();
         let s1 = heap.alloc_string("main".into());
         let s2 = heap.alloc_string("helper".into());
-        let f1 = Function::new("a", 0, vec![OpCode::Push(Value::String(s1)), OpCode::Halt], 0);
-        let f2 = Function::new("b", 0, vec![OpCode::Push(Value::String(s2)), OpCode::Halt], 0);
+        let f1 = Function::new(
+            "a",
+            0,
+            vec![OpCode::Push(Value::String(s1)), OpCode::Halt],
+            0,
+        );
+        let f2 = Function::new(
+            "b",
+            0,
+            vec![OpCode::Push(Value::String(s2)), OpCode::Halt],
+            0,
+        );
 
         let bytes = serialize_module(&[f1.clone(), f2.clone()], &heap);
         let (restored, restore_heap) = deserialize_module(&bytes).unwrap();
