@@ -325,6 +325,7 @@ impl VM {
     }
 
     /// Execute a single instruction.
+    #[allow(clippy::too_many_lines)]
     pub fn step(&mut self) -> Result<(), VmError> {
         let frame_idx = self
             .frames
@@ -444,9 +445,188 @@ impl VM {
             OpCode::Yield | OpCode::Halt => {
                 self.running = false;
             }
+
+            // -- I/O: file --
+            OpCode::FileOpen { path, mode } => {
+                let mode_val = mode;
+                let path_val = path;
+                let path_str = match &path_val {
+                    Value::String(gc) => {
+                        self.heap.get(*gc).map(|s| s.data.clone()).unwrap_or_default()
+                    }
+                    _ => path_val.to_string(),
+                };
+                let fmode = match &mode_val {
+                    Value::String(gc) => {
+                        match self.heap.get(*gc).map(|s| s.data.as_str()) {
+                            Some("w" | "W") => crate::io::FileMode::Write,
+                            Some("a" | "A") => crate::io::FileMode::Append,
+                            _ => crate::io::FileMode::Read,
+                        }
+                    }
+                    _ => crate::io::FileMode::Read,
+                };
+                let handle = IoHandle::File {
+                    path: path_str,
+                    mode: fmode,
+                    position: 0,
+                    strategy: crate::io::IoStrategy::Seek,
+                };
+                let id = self.create_handle(handle);
+                self.stack.push(Value::Int(i64::from(id.0)));
+            }
+            OpCode::FileRead(h) => {
+                let data = self.read_file_handle(h)?;
+                self.stack.push(data);
+            }
+            OpCode::FileWrite(h) => {
+                let data = self.pop()?;
+                let _written = self.write_file_handle(h, &data)?;
+            }
+            OpCode::FileSeek { handle, offset } => {
+                let pos = self.seek_file_handle(handle, &offset);
+                #[allow(clippy::cast_possible_wrap)]
+                self.stack.push(Value::Int(pos as i64));
+            }
+            OpCode::FileClose(h) | OpCode::TcpClose(h) => {
+                let removed = self.close_handle(h);
+                self.stack.push(Value::Bool(removed));
+            }
+
+            // -- I/O: TCP (placeholders) --
+            OpCode::TcpConnect { addr: _ } => {
+                // Placeholder: create a TcpStream handle and push its id
+                let handle = IoHandle::TcpStream {
+                    addr: String::new(),
+                    strategy: crate::io::IoStrategy::Replay,
+                };
+                let id = self.create_handle(handle);
+                self.stack.push(Value::Int(i64::from(id.0)));
+            }
+            OpCode::TcpRead(h) => {
+                // Placeholder: push empty list
+                let _ = h;
+                self.stack.push(Value::Null);
+            }
+            OpCode::TcpWrite(h) => {
+                let _data = self.pop()?;
+                let _ = h;
+            }
+
+            // -- I/O: HTTP (placeholders) --
+            OpCode::HttpGet { url: _ } | OpCode::HttpPost { url: _, body: _ } => {
+                // Placeholder: push Null response
+                self.stack.push(Value::Null);
+            }
+
+            // -- I/O: standard streams --
+            OpCode::StdinRead => {
+                let data = self.read_stdin();
+                self.stack.push(data);
+            }
+            OpCode::StdoutWrite => {
+                let data = self.pop()?;
+                self.write_stdout(&data);
+            }
+            OpCode::StderrWrite => {
+                let data = self.pop()?;
+                self.write_stderr(&data);
+            }
+
+            // -- I/O: timer (placeholder) --
+            OpCode::TimerSleep { ms: _ } => {
+                // Placeholder: sleep is a no-op in this phase
+            }
         }
 
         Ok(())
+    }
+
+    // -- I/O helpers --
+
+    fn read_file_handle(&mut self, h: HandleId) -> Result<Value, VmError> {
+        use std::io::Read;
+        let path = match self.handles.get(&h) {
+            Some(IoHandle::File { path, .. }) => path.clone(),
+            _ => return Ok(Value::Null),
+        };
+        let mut file = std::fs::File::open(&path).map_err(|_e| {
+            VmError::HeapError(HeapError::InvalidHandle)
+        })?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).map_err(|_| {
+            VmError::HeapError(HeapError::InvalidHandle)
+        })?;
+        // Convert bytes to a List of Ints
+        let elements: Vec<Value> = buf.into_iter().map(|b| Value::Int(i64::from(b))).collect();
+        let gc = self.heap.alloc_list(elements);
+        Ok(Value::List(gc))
+    }
+
+    fn write_file_handle(&mut self, h: HandleId, data: &Value) -> Result<usize, VmError> {
+        use std::io::Write;
+        let path = match self.handles.get(&h) {
+            Some(IoHandle::File { path, .. }) => path.clone(),
+            _ => return Ok(0),
+        };
+        let bytes = value_to_bytes(data);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+        file.write_all(&bytes).map_err(|_| {
+            VmError::HeapError(HeapError::InvalidHandle)
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn seek_file_handle(&mut self, h: HandleId, offset: &Value) -> u64 {
+        let off = match offset {
+#[allow(clippy::cast_sign_loss)]
+            Value::Int(n) => *n as u64,
+            _ => 0,
+        };
+        // Update the position in the handle
+        if let Some(IoHandle::File { position, .. }) = self.handles.get_mut(&h) {
+            *position = off;
+        }
+        off
+    }
+
+    fn read_stdin(&mut self) -> Value {
+        // Find the first Stdin handle and return its buffer as a List
+        for handle in self.handles.values() {
+            if let IoHandle::Stdin { buffer } = handle {
+                let elements: Vec<Value> = buffer.iter().map(|&b| Value::Int(i64::from(b))).collect();
+                let gc = self.heap.alloc_list(elements);
+                return Value::List(gc);
+            }
+        }
+        Value::Null
+    }
+
+    fn write_stdout(&mut self, data: &Value) {
+        let bytes = value_to_bytes(data);
+        // Write to first Stdout handle
+        for handle in self.handles.values_mut() {
+            if let IoHandle::Stdout { buffer } = handle {
+                buffer.extend_from_slice(&bytes);
+                return;
+            }
+        }
+    }
+
+    fn write_stderr(&mut self, data: &Value) {
+        let bytes = value_to_bytes(data);
+        // Write to first Stderr handle
+        for handle in self.handles.values_mut() {
+            if let IoHandle::Stderr { buffer } = handle {
+                buffer.extend_from_slice(&bytes);
+                return;
+            }
+        }
     }
 
     // -- stack helpers --
@@ -478,6 +658,25 @@ impl VM {
         let result = op(&val).map_err(VmError::TypeError)?;
         self.stack.push(result);
         Ok(())
+    }
+}
+
+/// Convert a Value to a byte vector for I/O write operations.
+fn value_to_bytes(val: &Value) -> Vec<u8> {
+    match val {
+        Value::Int(n) => n.to_string().into_bytes(),
+        Value::Float(f) => f.to_string().into_bytes(),
+        Value::Bool(b) => if *b { b"true".to_vec() } else { b"false".to_vec() },
+        Value::Null => b"null".to_vec(),
+        Value::String(_gc) => {
+            // GC-backed strings are checked at the VM-level; here we just
+            // return empty bytes for safety.
+            Vec::new()
+        }
+        Value::List(_gc) => {
+            // Lists are serialized as [] for now
+            Vec::new()
+        }
     }
 }
 

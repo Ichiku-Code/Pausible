@@ -6,6 +6,7 @@ use core::fmt;
 
 use crate::heap::Heap;
 use crate::function::Function;
+use crate::io::HandleId;
 use crate::opcode::OpCode;
 use crate::value::Value;
 
@@ -117,6 +118,21 @@ mod tag {
     pub const CALL: u8 = 0x18;
     pub const RETURN: u8 = 0x19;
     pub const YIELD: u8 = 0x1A;
+    pub const FILE_OPEN: u8 = 0x1B;
+    pub const FILE_READ: u8 = 0x1C;
+    pub const FILE_WRITE: u8 = 0x1D;
+    pub const FILE_SEEK: u8 = 0x1E;
+    pub const FILE_CLOSE: u8 = 0x1F;
+    pub const TCP_CONNECT: u8 = 0x20;
+    pub const TCP_READ: u8 = 0x21;
+    pub const TCP_WRITE: u8 = 0x22;
+    pub const TCP_CLOSE: u8 = 0x23;
+    pub const HTTP_GET: u8 = 0x24;
+    pub const HTTP_POST: u8 = 0x25;
+    pub const STDIN_READ: u8 = 0x26;
+    pub const STDOUT_WRITE: u8 = 0x27;
+    pub const STDERR_WRITE: u8 = 0x28;
+    pub const TIMER_SLEEP: u8 = 0x29;
 }
 
 /// Value type tags.
@@ -195,6 +211,7 @@ fn write_value(buf: &mut Vec<u8>, val: &Value, heap: &Heap) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_opcode(buf: &mut Vec<u8>, op: &OpCode, heap: &Heap) {
     match op {
         OpCode::Push(v) => {
@@ -245,6 +262,60 @@ fn write_opcode(buf: &mut Vec<u8>, op: &OpCode, heap: &Heap) {
         OpCode::Return => buf.push(tag::RETURN),
         OpCode::Yield => buf.push(tag::YIELD),
         OpCode::Halt => buf.push(tag::HALT),
+        OpCode::FileOpen { path, mode } => {
+            buf.push(tag::FILE_OPEN);
+            write_value(buf, path, heap);
+            write_value(buf, mode, heap);
+        }
+        OpCode::FileRead(h) => {
+            buf.push(tag::FILE_READ);
+            write_u32(buf, h.0);
+        }
+        OpCode::FileWrite(h) => {
+            buf.push(tag::FILE_WRITE);
+            write_u32(buf, h.0);
+        }
+        OpCode::FileSeek { handle, offset } => {
+            buf.push(tag::FILE_SEEK);
+            write_u32(buf, handle.0);
+            write_value(buf, offset, heap);
+        }
+        OpCode::FileClose(h) => {
+            buf.push(tag::FILE_CLOSE);
+            write_u32(buf, h.0);
+        }
+        OpCode::TcpConnect { addr } => {
+            buf.push(tag::TCP_CONNECT);
+            write_value(buf, addr, heap);
+        }
+        OpCode::TcpRead(h) => {
+            buf.push(tag::TCP_READ);
+            write_u32(buf, h.0);
+        }
+        OpCode::TcpWrite(h) => {
+            buf.push(tag::TCP_WRITE);
+            write_u32(buf, h.0);
+        }
+        OpCode::TcpClose(h) => {
+            buf.push(tag::TCP_CLOSE);
+            write_u32(buf, h.0);
+        }
+        OpCode::HttpGet { url } => {
+            buf.push(tag::HTTP_GET);
+            write_value(buf, url, heap);
+        }
+        OpCode::HttpPost { url, body } => {
+            buf.push(tag::HTTP_POST);
+            write_value(buf, url, heap);
+            write_value(buf, body, heap);
+        }
+        OpCode::StdinRead => buf.push(tag::STDIN_READ),
+        OpCode::StdoutWrite => buf.push(tag::STDOUT_WRITE),
+        OpCode::StderrWrite => buf.push(tag::STDERR_WRITE),
+        OpCode::TimerSleep { ms } => {
+            buf.push(tag::TIMER_SLEEP);
+            write_value(buf, ms, heap);
+        }
     }
 }
 
@@ -313,6 +384,7 @@ fn read_value(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<Value, Se
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn read_opcode(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<OpCode, SerError> {
     let tag = data.get(*pos).ok_or(SerError::UnexpectedEof)?;
     *pos += 1;
@@ -365,6 +437,60 @@ fn read_opcode(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<OpCode, 
         }
         tag::RETURN => Ok(OpCode::Return),
         tag::YIELD => Ok(OpCode::Yield),
+        tag::FILE_OPEN => {
+            let path = read_value(data, pos, heap)?;
+            let mode = read_value(data, pos, heap)?;
+            Ok(OpCode::FileOpen { path, mode })
+        }
+        tag::FILE_READ => {
+            let h = read_u32(data, pos)?;
+            Ok(OpCode::FileRead(HandleId(h)))
+        }
+        tag::FILE_WRITE => {
+            let h = read_u32(data, pos)?;
+            Ok(OpCode::FileWrite(HandleId(h)))
+        }
+        tag::FILE_SEEK => {
+            let handle_raw = read_u32(data, pos)?;
+            let offset = read_value(data, pos, heap)?;
+            Ok(OpCode::FileSeek { handle: HandleId(handle_raw), offset })
+        }
+        tag::FILE_CLOSE => {
+            let h = read_u32(data, pos)?;
+            Ok(OpCode::FileClose(HandleId(h)))
+        }
+        tag::TCP_CONNECT => {
+            let addr = read_value(data, pos, heap)?;
+            Ok(OpCode::TcpConnect { addr })
+        }
+        tag::TCP_READ => {
+            let h = read_u32(data, pos)?;
+            Ok(OpCode::TcpRead(HandleId(h)))
+        }
+        tag::TCP_WRITE => {
+            let h = read_u32(data, pos)?;
+            Ok(OpCode::TcpWrite(HandleId(h)))
+        }
+        tag::TCP_CLOSE => {
+            let h = read_u32(data, pos)?;
+            Ok(OpCode::TcpClose(HandleId(h)))
+        }
+        tag::HTTP_GET => {
+            let url = read_value(data, pos, heap)?;
+            Ok(OpCode::HttpGet { url })
+        }
+        tag::HTTP_POST => {
+            let url = read_value(data, pos, heap)?;
+            let body = read_value(data, pos, heap)?;
+            Ok(OpCode::HttpPost { url, body })
+        }
+        tag::STDIN_READ => Ok(OpCode::StdinRead),
+        tag::STDOUT_WRITE => Ok(OpCode::StdoutWrite),
+        tag::STDERR_WRITE => Ok(OpCode::StderrWrite),
+        tag::TIMER_SLEEP => {
+            let ms = read_value(data, pos, heap)?;
+            Ok(OpCode::TimerSleep { ms })
+        }
         _ => Err(SerError::UnknownOpcode(*tag)),
     }
 }
