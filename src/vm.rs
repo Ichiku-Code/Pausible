@@ -71,6 +71,9 @@ pub enum VmError {
     Halted,
     /// I/O operation failed.
     IoError(String),
+    /// Attempted to Yield while the current task still has
+    /// children that are not yet Completed (v1 rule).
+    UncompletedChildren(Vec<TaskId>),
 }
 
 impl fmt::Display for VmError {
@@ -85,6 +88,10 @@ impl fmt::Display for VmError {
             Self::HeapError(e) => write!(f, "{e}"),
             Self::Halted => write!(f, "VM halted"),
             Self::IoError(msg) => write!(f, "I/O error: {msg}"),
+            Self::UncompletedChildren(ids) => {
+                let list: Vec<String> = ids.iter().map(|id| format!("{id}")).collect();
+                write!(f, "cannot yield: uncompleted children: {}", list.join(", "))
+            }
         }
     }
 }
@@ -559,6 +566,29 @@ impl VM {
                 let _ = frame;
             }
             OpCode::Yield => {
+                // v1 rule: Yield is only allowed when all direct children
+                // have completed. Check the task registry and reject if any
+                // child is still Running or Yielded.
+                let uncompleted: Vec<TaskId> = {
+                    let current = self
+                        .task_registry
+                        .get(&self.current_task_id)
+                        .expect("current task must exist");
+                    current
+                        .children
+                        .iter()
+                        .filter(|child_id| {
+                            self.task_registry
+                                .get(child_id)
+                                .is_some_and(|t| t.status != TaskStatus::Completed)
+                        })
+                        .copied()
+                        .collect()
+                };
+                if !uncompleted.is_empty() {
+                    return Err(VmError::UncompletedChildren(uncompleted));
+                }
+
                 let ch = self.code_hash();
                 self.snapshot = Some(Snapshot::capture(self, ch));
                 self.running = false;
@@ -749,6 +779,9 @@ impl VM {
 
                 // Restore parent state and push collected return values.
                 self.restore_task(parent_id);
+                // Re-enable execution so the parent continues past
+                // WaitChildren (child's Return/Halt set running=false).
+                self.running = true;
                 for val in return_values {
                     self.stack.push(val);
                 }
@@ -2500,5 +2533,84 @@ mod tests {
         assert_eq!(vm.task_count(), 3); // root + 2 children
         assert!(vm.task_registry.contains_key(&TaskId(1)));
         assert!(vm.task_registry.contains_key(&TaskId(2)));
+    }
+
+    // -- Phase 4.3: Yield before children completed --
+
+    #[test]
+    fn yield_before_wait_children_returns_error() {
+        // Main spawns a child and tries to yield without waiting.
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1), // spawn child (status Running)
+                OpCode::Yield,    // should fail — child not Completed
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child);
+        vm.prepare(0).unwrap();
+
+        let result = vm.run();
+        assert!(result.is_err());
+        match result {
+            Err(VmError::UncompletedChildren(ids)) => {
+                assert_eq!(ids.len(), 1);
+                assert_eq!(ids[0], TaskId(1));
+            }
+            other => panic!("expected UncompletedChildren, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yield_after_wait_children_succeeds() {
+        // Main spawns a child, waits, then yields — this should work.
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),
+                OpCode::WaitChildren, // child completes here
+                OpCode::Yield,        // now allowed
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        // Yield should have created a snapshot
+        assert!(vm.snapshot.is_some());
+        // Child should be completed
+        let child_task = vm.task_registry.get(&TaskId(1)).unwrap();
+        assert_eq!(child_task.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn uncompleted_children_error_display() {
+        let err = VmError::UncompletedChildren(vec![TaskId(1), TaskId(3)]);
+        let msg = format!("{err}");
+        assert!(msg.contains("cannot yield"));
+        assert!(msg.contains("Task(1)"));
+        assert!(msg.contains("Task(3)"));
     }
 }
