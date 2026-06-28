@@ -945,4 +945,47 @@ mod tests {
             panic!("expected Push(String) in f2");
         }
     }
+
+    #[test]
+    fn function_roundtrip_with_io_opcodes() {
+        let func = Function::new(
+            "io_test",
+            0,
+            vec![
+                OpCode::FileOpen {
+                    path: Value::Null,
+                    mode: Value::Null,
+                },
+                OpCode::FileRead(HandleId(0)),
+                OpCode::FileWrite(HandleId(0)),
+                OpCode::FileSeek {
+                    handle: HandleId(0),
+                    offset: Value::Int(10),
+                },
+                OpCode::FileClose(HandleId(0)),
+                OpCode::TcpConnect { addr: Value::Null },
+                OpCode::TcpRead(HandleId(1)),
+                OpCode::TcpWrite(HandleId(1)),
+                OpCode::TcpClose(HandleId(1)),
+                OpCode::HttpGet { url: Value::Null },
+                OpCode::HttpPost {
+                    url: Value::Null,
+                    body: Value::Null,
+                },
+                OpCode::StdinRead,
+                OpCode::StdoutWrite,
+                OpCode::StderrWrite,
+                OpCode::TimerSleep { ms: Value::Int(500) },
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let heap = Heap::new();
+        let bytes = serialize_function(&func, &heap);
+        let mut restored_heap = Heap::new();
+        let restored = deserialize_function(&bytes, &mut restored_heap).unwrap();
+        assert_eq!(restored.name, "io_test");
+        assert_eq!(restored.arity, 0);
+        assert_eq!(restored.code, func.code);
+    }
 }

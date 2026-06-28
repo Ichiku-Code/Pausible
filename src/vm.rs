@@ -6,7 +6,8 @@ use core::fmt;
 
 use crate::function::Function;
 use crate::heap::{Gc, Heap, ListObj, StringObj};
-use crate::io::{HandleId, IoHandle};
+use crate::io::{HandleId, IoHandle, IoStrategy};
+use std::net::TcpStream;
 use crate::opcode::OpCode;
 use crate::value::{TypeError, Value};
 use std::collections::HashMap;
@@ -66,6 +67,8 @@ pub enum VmError {
     HeapError(HeapError),
     /// Execution has stopped (Halt reached).
     Halted,
+    /// I/O operation failed.
+    IoError(String),
 }
 
 impl fmt::Display for VmError {
@@ -79,6 +82,7 @@ impl fmt::Display for VmError {
             Self::TypeError(e) => write!(f, "{e}"),
             Self::HeapError(e) => write!(f, "{e}"),
             Self::Halted => write!(f, "VM halted"),
+            Self::IoError(msg) => write!(f, "I/O error: {msg}"),
         }
     }
 }
@@ -476,6 +480,8 @@ impl VM {
                     mode: fmode,
                     position: 0,
                     strategy: crate::io::IoStrategy::Seek,
+                    file: None,
+                    cached: None,
                 };
                 let id = self.create_handle(handle);
                 self.stack.push(Value::Int(i64::from(id.0)));
@@ -498,30 +504,41 @@ impl VM {
                 self.stack.push(Value::Bool(removed));
             }
 
-            // -- I/O: TCP (placeholders) --
-            OpCode::TcpConnect { addr: _ } => {
-                // Placeholder: create a TcpStream handle and push its id
-                let handle = IoHandle::TcpStream {
-                    addr: String::new(),
-                    strategy: crate::io::IoStrategy::Replay,
-                };
-                let id = self.create_handle(handle);
-                self.stack.push(Value::Int(i64::from(id.0)));
+            // -- I/O: TCP --
+            OpCode::TcpConnect { addr } => {
+                let addr_str = value_to_string(&self.heap, &addr);
+                match TcpStream::connect(&addr_str) {
+                    Ok(stream) => {
+                        let handle = IoHandle::TcpStream {
+                            addr: addr_str,
+                            strategy: crate::io::IoStrategy::Replay,
+                            stream: Some(stream),
+                            last_request: None,
+                            last_response: None,
+                        };
+                        let id = self.create_handle(handle);
+                        self.stack.push(Value::Int(i64::from(id.0)));
+                    }
+                    Err(e) => return Err(VmError::IoError(format!("TCP connect to {addr_str}: {e}"))),
+                }
             }
             OpCode::TcpRead(h) => {
-                // Placeholder: push empty list
-                let _ = h;
-                self.stack.push(Value::Null);
+                let data = self.tcp_read_handle(h)?;
+                self.stack.push(data);
             }
             OpCode::TcpWrite(h) => {
-                let _data = self.pop()?;
-                let _ = h;
+                let data = self.pop()?;
+                self.tcp_write_handle(h, &data)?;
             }
 
-            // -- I/O: HTTP (placeholders) --
-            OpCode::HttpGet { url: _ } | OpCode::HttpPost { url: _, body: _ } => {
-                // Placeholder: push Null response
-                self.stack.push(Value::Null);
+            // -- I/O: HTTP --
+            OpCode::HttpGet { url } => {
+                let data = self.http_get(&url)?;
+                self.stack.push(data);
+            }
+            OpCode::HttpPost { url, body } => {
+                let data = self.http_post(&url, &body)?;
+                self.stack.push(data);
             }
 
             // -- I/O: standard streams --
@@ -550,17 +567,72 @@ impl VM {
     // -- I/O helpers --
 
     fn read_file_handle(&mut self, h: HandleId) -> Result<Value, VmError> {
-        use std::io::Read;
-        let path = match self.handles.get(&h) {
-            Some(IoHandle::File { path, .. }) => path.clone(),
+        use std::io::{Read, Seek};
+        // Strategy-aware: check for cached data first
+        let (path, strategy, cached) = match self.handles.get(&h) {
+            Some(IoHandle::File { path, strategy, cached, .. }) => {
+                (path.clone(), *strategy, cached.clone())
+            }
             _ => return Ok(Value::Null),
         };
-        let mut file = std::fs::File::open(&path)
-            .map_err(|_e| VmError::HeapError(HeapError::InvalidHandle))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)
-            .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
-        // Convert bytes to a List of Ints
+
+        // Cached: return cached data if available
+        if strategy == IoStrategy::Cached {
+            if let Some(data) = cached {
+                let elements: Vec<Value> =
+                    data.into_iter().map(|b| Value::Int(i64::from(b))).collect();
+                let gc = self.heap.alloc_list(elements);
+                return Ok(Value::List(gc));
+            }
+        }
+
+        // Seek: use stored file handle if available
+        let buf = if strategy == IoStrategy::Seek {
+            let mut buf = Vec::new();
+            let handle = self.handles.get_mut(&h);
+            if let Some(IoHandle::File { file: Some(f), position, .. }) = handle {
+                *position = f.seek(std::io::SeekFrom::Start(*position)).unwrap_or(*position);
+                f.read_to_end(&mut buf)
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                buf
+            } else {
+                // Fallback: re-open from path for Seek if no stored handle
+                let path_str = match self.handles.get(&h) {
+                    Some(IoHandle::File { path, .. }) => path.clone(),
+                    _ => return Ok(Value::Null),
+                };
+                let pos = match self.handles.get(&h) {
+                    Some(IoHandle::File { position, .. }) => *position,
+                    _ => 0,
+                };
+                let mut file = std::fs::File::open(&path_str)
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                file.seek(std::io::SeekFrom::Start(pos))
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf)
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                // Update position after fallback read
+                if let Some(IoHandle::File { position, .. }) = self.handles.get_mut(&h) {
+                    *position = pos + buf.len() as u64;
+                }
+                buf
+            }
+        } else {
+            // Replay or fallback: re-open from path
+            let mut file = std::fs::File::open(&path)
+                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)
+                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+            buf
+        };
+
+        // Cache the read data for all strategies (for snapshot)
+        if let Some(IoHandle::File { cached, .. }) = self.handles.get_mut(&h) {
+            *cached = Some(buf.clone());
+        }
+
         let elements: Vec<Value> = buf.into_iter().map(|b| Value::Int(i64::from(b))).collect();
         let gc = self.heap.alloc_list(elements);
         Ok(Value::List(gc))
@@ -568,35 +640,64 @@ impl VM {
 
     fn write_file_handle(&mut self, h: HandleId, data: &Value) -> Result<usize, VmError> {
         use std::io::Write;
-        let path = match self.handles.get(&h) {
-            Some(IoHandle::File { path, .. }) => path.clone(),
+        let (path, strategy) = match self.handles.get(&h) {
+            Some(IoHandle::File { path, strategy, .. }) => (path.clone(), *strategy),
             _ => return Ok(0),
         };
         let bytes = value_to_bytes(data);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
-        file.write_all(&bytes)
-            .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+
+        // Strategy-aware write: use stored file handle for Seek, otherwise re-open
+        if strategy == IoStrategy::Seek {
+            if let Some(IoHandle::File { file: Some(f), .. }) = self.handles.get_mut(&h) {
+                f.write_all(&bytes)
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+            } else {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                file.write_all(&bytes)
+                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+            }
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+            file.write_all(&bytes)
+                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+        }
+
+        // Cache the written data for Cached strategy
+        if let Some(IoHandle::File { cached, strategy: s, .. }) = self.handles.get_mut(&h) {
+            if *s == IoStrategy::Cached {
+                *cached = Some(bytes.clone());
+            }
+        }
+
         Ok(bytes.len())
     }
 
     fn seek_file_handle(&mut self, h: HandleId, offset: &Value) -> u64 {
+        use std::io::Seek;
         let off = match offset {
             #[allow(clippy::cast_sign_loss)]
             Value::Int(n) => *n as u64,
             _ => 0,
         };
-        // Update the position in the handle
-        if let Some(IoHandle::File { position, .. }) = self.handles.get_mut(&h) {
+        // Update position and seek on stored file if present
+        if let Some(IoHandle::File { position, file, .. }) = self.handles.get_mut(&h) {
             *position = off;
+            if let Some(f) = file {
+                let _ = f.seek(std::io::SeekFrom::Start(off));
+            }
         }
         off
     }
-
     fn read_stdin(&mut self) -> Value {
         // Find the first Stdin handle and return its buffer as a List
         for handle in self.handles.values() {
@@ -630,6 +731,114 @@ impl VM {
                 return;
             }
         }
+    }
+
+    fn tcp_read_handle(&mut self, h: HandleId) -> Result<Value, VmError> {
+        use std::io::Read;
+        let response_data = {
+            let handle = self
+                .handles
+                .get_mut(&h)
+                .ok_or_else(|| VmError::IoError("invalid TCP handle".into()))?;
+            let IoHandle::TcpStream {
+                stream,
+                last_response,
+                ..
+            } = handle
+            else {
+                return Err(VmError::IoError("handle is not a TcpStream".into()));
+            };
+            let s = stream
+                .as_mut()
+                .ok_or_else(|| VmError::IoError("TCP stream not connected".into()))?;
+            let mut buf = vec![0u8; 4096];
+            let n = s
+                .read(&mut buf)
+                .map_err(|e| VmError::IoError(format!("TCP read: {e}")))?;
+            buf.truncate(n);
+            *last_response = Some(buf.clone());
+            buf
+        };
+
+        let elements: Vec<Value> =
+            response_data.into_iter().map(|b| Value::Int(i64::from(b))).collect();
+        let gc = self.heap.alloc_list(elements);
+        Ok(Value::List(gc))
+    }
+
+    fn tcp_write_handle(&mut self, h: HandleId, data: &Value) -> Result<(), VmError> {
+        use std::io::Write;
+        let bytes = value_to_bytes(data);
+        let handle = self
+            .handles
+            .get_mut(&h)
+            .ok_or_else(|| VmError::IoError("invalid TCP handle".into()))?;
+        let IoHandle::TcpStream {
+            stream,
+            last_request,
+            ..
+        } = handle
+        else {
+            return Err(VmError::IoError("handle is not a TcpStream".into()));
+        };
+        let s = stream
+            .as_mut()
+            .ok_or_else(|| VmError::IoError("TCP stream not connected".into()))?;
+        s.write_all(&bytes)
+            .map_err(|e| VmError::IoError(format!("TCP write: {e}")))?;
+        *last_request = Some(bytes);
+        Ok(())
+    }
+
+    fn http_get(&mut self, url_val: &Value) -> Result<Value, VmError> {
+        let url_str = value_to_string(&self.heap, url_val);
+
+        let response = ureq::get(&url_str)
+            .call()
+            .map_err(|e| VmError::IoError(format!("HTTP GET {url_str}: {e}")))?;
+
+        let body = response
+            .into_string()
+            .map_err(|e| VmError::IoError(format!("HTTP GET {url_str}: read body: {e}")))?;
+
+        // Create a handle to record the request + response for snapshot
+        let handle = IoHandle::HttpConnection {
+            url: url_str,
+            method: crate::io::HttpMethod::Get,
+            body: None,
+            last_response: Some(body.clone().into_bytes()),
+            strategy: crate::io::IoStrategy::Replay,
+        };
+        self.create_handle(handle);
+
+        let gc = self.heap.alloc_string(body);
+        Ok(Value::String(gc))
+    }
+
+    fn http_post(&mut self, url_val: &Value, body_val: &Value) -> Result<Value, VmError> {
+        let url_str = value_to_string(&self.heap, url_val);
+        let body_bytes = value_to_bytes(body_val);
+        let body_str = String::from_utf8_lossy(&body_bytes);
+
+        let response = ureq::post(&url_str)
+            .send_string(&body_str)
+            .map_err(|e| VmError::IoError(format!("HTTP POST {url_str}: {e}")))?;
+
+        let resp_body = response
+            .into_string()
+            .map_err(|e| VmError::IoError(format!("HTTP POST {url_str}: read body: {e}")))?;
+
+        let handle = IoHandle::HttpConnection {
+            url: url_str,
+            method: crate::io::HttpMethod::Post,
+            body: Some(body_bytes),
+            last_response: Some(resp_body.clone().into_bytes()),
+            strategy: crate::io::IoStrategy::Replay,
+        };
+        self.create_handle(handle);
+
+        let gc = self.heap.alloc_string(resp_body);
+        Ok(Value::String(gc))
     }
 
     // -- stack helpers --
@@ -683,6 +892,14 @@ fn value_to_bytes(val: &Value) -> Vec<u8> {
             // Lists are serialized as [] for now
             Vec::new()
         }
+    }
+}
+
+/// Convert a Value to a string. For String values, reads from the heap.
+fn value_to_string(heap: &Heap, val: &Value) -> String {
+    match val {
+        Value::String(gc) => heap.get(*gc).map(|s| s.data.clone()).unwrap_or_default(),
+        other => other.to_string(),
     }
 }
 
@@ -1328,6 +1545,8 @@ mod tests {
     fn handle_creation_and_retrieval() {
         let mut vm = VM::new();
         let h = IoHandle::File {
+            file: None,
+            cached: None,
             path: "/tmp/a.txt".into(),
             mode: crate::io::FileMode::Read,
             position: 0,
@@ -1379,6 +1598,8 @@ mod tests {
         let h = IoHandle::File {
             path: "/tmp/log.txt".into(),
             mode: crate::io::FileMode::Write,
+            file: None,
+            cached: None,
             position: 0,
             strategy: crate::io::IoStrategy::Seek,
         };
@@ -1409,6 +1630,8 @@ mod tests {
         vm.create_handle(IoHandle::File {
             path: "/tmp/x".into(),
             mode: crate::io::FileMode::Read,
+            file: None,
+            cached: None,
             position: 0,
             strategy: crate::io::IoStrategy::Seek,
         });
@@ -1442,5 +1665,342 @@ mod tests {
         assert_eq!(id, HandleId(u32::MAX));
         // wrapping_add: next becomes 0
         assert_eq!(vm.next_handle_id, 0);
+    }
+
+    // -- I/O opcode execution tests --
+
+    #[test]
+    fn file_open_opcode_creates_file_handle() {
+        let mut vm = VM::new();
+        let path = vm.alloc_string("/tmp/pausible_test_open.txt".into());
+        let mode = vm.alloc_string("w".into());
+        std::fs::write("/tmp/pausible_test_open.txt", b"hello").unwrap();
+
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::FileOpen { path: Value::String(path), mode: Value::String(mode) },
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.step().unwrap();
+
+        assert_eq!(vm.handle_count(), 1);
+        if let Value::Int(id) = vm.stack.last().unwrap() {
+            let h = vm.get_handle(HandleId(*id as u32)).unwrap();
+            assert_eq!(h.kind_name(), "File");
+        } else {
+            panic!("expected Int handle ID on stack");
+        }
+        let _ = std::fs::remove_file("/tmp/pausible_test_open.txt");
+    }
+
+    #[test]
+    fn file_open_parses_read_mode_from_string() {
+        let mut vm = VM::new();
+        let path = vm.alloc_string("/tmp/pausible_test_mode.txt".into());
+        let mode = vm.alloc_string("r".into());
+        std::fs::write("/tmp/pausible_test_mode.txt", b"data").unwrap();
+
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::FileOpen { path: Value::String(path), mode: Value::String(mode) },
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.step().unwrap();
+
+        let id = if let Value::Int(id) = vm.stack.last().unwrap() { *id as u32 } else { 0 };
+        if let IoHandle::File { mode: fmode, .. } = vm.get_handle(HandleId(id)).unwrap() {
+            assert_eq!(*fmode, crate::io::FileMode::Read);
+        } else {
+            panic!("expected File handle");
+        }
+        let _ = std::fs::remove_file("/tmp/pausible_test_mode.txt");
+    }
+
+    #[test]
+    fn file_close_opcode_removes_handle_and_pushes_bool() {
+        let mut vm = VM::new();
+        let path = vm.alloc_string("/tmp/pausible_test_close.txt".into());
+        let mode = vm.alloc_string("w".into());
+        std::fs::write("/tmp/pausible_test_close.txt", b"").unwrap();
+
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::FileOpen { path: Value::String(path), mode: Value::String(mode) },
+                OpCode::FileClose(HandleId(0)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.step().unwrap(); // FileOpen
+        vm.step().unwrap(); // FileClose
+        assert_eq!(vm.handle_count(), 0);
+        assert_eq!(vm.stack.last().unwrap(), &Value::Bool(true));
+        let _ = std::fs::remove_file("/tmp/pausible_test_close.txt");
+    }
+
+    #[test]
+    fn file_write_then_read() {
+        let mut vm = VM::new();
+        let path = "/tmp/pausible_test_write_read.txt";
+        std::fs::write(path, b"").unwrap();
+
+        let h = vm.create_handle(IoHandle::File {
+            path: path.into(),
+            mode: crate::io::FileMode::Write,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+            file: None,
+            cached: None,
+        });
+        let id = h;
+
+        let data = Value::Int(42);
+        let written = vm.write_file_handle(id, &data).unwrap();
+        assert_eq!(written, 2);
+
+        let read_h = vm.create_handle(IoHandle::File {
+            path: path.into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+            file: None,
+            cached: None,
+        });
+        let result = vm.read_file_handle(read_h).unwrap();
+        assert!(matches!(result, Value::List(_)));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_read_from_handle() {
+        let path = "/tmp/pausible_test_read.txt";
+        std::fs::write(path, b"abc").unwrap();
+
+        let mut vm = VM::new();
+        let h = vm.create_handle(IoHandle::File {
+            path: path.into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+            file: None,
+            cached: None,
+        });
+
+        let result = vm.read_file_handle(h).unwrap();
+        if let Value::List(gc) = result {
+            let elements = &vm.heap.get(gc).unwrap().elements;
+            assert_eq!(elements, &[
+                Value::Int(0x61),
+                Value::Int(0x62),
+                Value::Int(0x63),
+            ]);
+        } else {
+            panic!("expected List from file read");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_seek_tracks_position() {
+        let path = "/tmp/pausible_test_seek.txt";
+        std::fs::write(path, b"abcdef").unwrap();
+
+        let mut vm = VM::new();
+        let h = vm.create_handle(IoHandle::File {
+            path: path.into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+            file: None,
+            cached: None,
+        });
+
+        vm.seek_file_handle(h, &Value::Int(3));
+        let result = vm.read_file_handle(h).unwrap();
+        if let Value::List(gc) = result {
+            let elements = &vm.heap.get(gc).unwrap().elements;
+            assert_eq!(elements.len(), 3);
+        } else {
+            panic!("expected List");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn seek_strategy_read_tracks_position() {
+        let path = "/tmp/pausible_test_seek_strategy.txt";
+        std::fs::write(path, b"0123456789").unwrap();
+
+        let mut vm = VM::new();
+        let h = vm.create_handle(IoHandle::File {
+            path: path.into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Seek,
+            file: None,
+            cached: None,
+        });
+
+        vm.seek_file_handle(h, &Value::Int(5));
+        let result = vm.read_file_handle(h).unwrap();
+        if let Value::List(gc) = result {
+            let elements = &vm.heap.get(gc).unwrap().elements;
+            assert_eq!(elements.len(), 5);
+        }
+
+        if let IoHandle::File { position, .. } = vm.get_handle(h).unwrap() {
+            assert_eq!(*position, 10);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+
+    // -- Std stream tests --
+
+    #[test]
+    fn stdout_write_accumulates() {
+        let mut vm = VM::new();
+        let h = vm.create_handle(IoHandle::Stdout { buffer: vec![] });
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Push(Value::Int(65)), // 'A'
+                OpCode::StdoutWrite,
+                OpCode::Push(Value::Int(66)), // 'B'
+                OpCode::StdoutWrite,
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        if let IoHandle::Stdout { buffer } = vm.get_handle(h).unwrap() {
+            assert_eq!(buffer, b"6566"); // "65" + "66" = ASCII digits of 65 and 66
+        } else {
+            panic!("expected Stdout handle");
+        }
+    }
+
+    #[test]
+    fn stderr_write_accumulates() {
+        let mut vm = VM::new();
+        let h = vm.create_handle(IoHandle::Stderr { buffer: vec![] });
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Push(Value::Bool(true)),
+                OpCode::StderrWrite,
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        if let IoHandle::Stderr { buffer } = vm.get_handle(h).unwrap() {
+            assert_eq!(buffer, b"true");
+        } else {
+            panic!("expected Stderr handle");
+        }
+    }
+
+    #[test]
+    fn stdin_read_from_buffer() {
+        let mut vm = VM::new();
+        vm.create_handle(IoHandle::Stdin { buffer: vec![72, 69, 76, 76, 79] }); // "HELLO"
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::StdinRead,
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.step().unwrap();
+
+        // stdin_read returns a List of Int values from the buffer
+        if let Value::List(gc) = vm.stack.last().unwrap() {
+            let elements = &vm.heap.get(*gc).unwrap().elements;
+            assert_eq!(elements.len(), 5);
+            assert_eq!(elements[0], Value::Int(72));
+            assert_eq!(elements[4], Value::Int(79));
+        } else {
+            panic!("expected List from stdin read");
+        }
+    }
+
+    // -- Cached strategy tests --
+
+    #[test]
+    fn cached_strategy_file_read_uses_cache() {
+        let mut vm = VM::new();
+        let h = vm.create_handle(IoHandle::File {
+            path: "/tmp/nonexistent_cached_test.txt".into(),
+            mode: crate::io::FileMode::Read,
+            position: 0,
+            strategy: crate::io::IoStrategy::Cached,
+            file: None,
+            cached: Some(vec![72, 105]), // "Hi"
+        });
+
+        // Should return cached data without opening file
+        let result = vm.read_file_handle(h).unwrap();
+        if let Value::List(gc) = result {
+            let elements = &vm.heap.get(gc).unwrap().elements;
+            assert_eq!(elements.len(), 2);
+            assert_eq!(elements[0], Value::Int(72));
+            assert_eq!(elements[1], Value::Int(105));
+        } else {
+            panic!("expected List from cached read");
+        }
+    }
+
+    // -- Timer tests --
+
+    #[test]
+    fn timer_sleep_is_noop() {
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Push(Value::Int(1)),
+                OpCode::TimerSleep { ms: Value::Int(1000) },
+                OpCode::Push(Value::Int(2)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        vm.add_function(main);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        // TimerSleep is a no-op: both pushes should execute
+        assert_eq!(vm.stack, &[Value::Int(1), Value::Int(2)]);
     }
 }

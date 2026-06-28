@@ -40,6 +40,10 @@ cargo clippy --tests -- -W clippy::pedantic
 
 `apply_patch` 处理含非 ASCII 字符的文件时，上下文匹配经常失败。中英混排文件的编辑优先用 `sed` 或 `python3 -c` 做精确行替换。
 
+### 网络受限时不要自行造轮子
+
+cargo 包下载失败（如 `ureq`）时，不要手写替代实现（如手写 HTTP 客户端）。停下来告知用户，由用户决定如何解决网络问题。
+
 ### Git 操作需要沙箱提权
 
 `.git` 在沙箱中是只读的，`git commit`/`git add` 需要 `sandbox_permissions: "require_escalated"`。
