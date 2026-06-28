@@ -44,7 +44,7 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 | **Ephemeral** | 一次性 | 完整缓存的数据 | 直接使用 snapshot 中的缓存值 |
 
 ### 3.4 Snapshot 中的 I/O 句柄
- > **状态：待实现。**
+ > **状态：已完成。**
 
 - `IoHandleSnapshot` 结构：`id`, `kind`, `strategy`, `params` (重连参数), `cached` (Ephemeral 缓存), `position` (Seekable 偏移)
 - `Snapshot::capture` 扩展：在标记根后遍历活跃 I/O 句柄，按策略序列化

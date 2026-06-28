@@ -7,6 +7,7 @@ use core::fmt;
 use crate::function::Function;
 use crate::heap::{Gc, Heap, ListObj, StringObj};
 use crate::io::{HandleId, IoHandle, IoStrategy};
+use crate::snapshot::Snapshot;
 use std::net::TcpStream;
 use crate::opcode::OpCode;
 use crate::value::{TypeError, Value};
@@ -124,6 +125,8 @@ pub struct VM {
     pub heap: Heap,
     /// Registered I/O handles, keyed by `HandleId`.
     pub handles: HashMap<HandleId, IoHandle>,
+    /// Snapshot captured on Yield (None before first yield).
+    pub snapshot: Option<Snapshot>,
     /// Monotonic counter for the next `HandleId` allocation.
     next_handle_id: u32,
 }
@@ -145,6 +148,7 @@ impl VM {
             handles: HashMap::new(),
             next_handle_id: 0,
             running: false,
+            snapshot: None,
         }
     }
 
@@ -451,7 +455,12 @@ impl VM {
                 // For Phase 1, leave return value handling to the bytecode.
                 let _ = frame;
             }
-            OpCode::Yield | OpCode::Halt => {
+            OpCode::Yield => {
+                let ch = self.code_hash();
+                self.snapshot = Some(Snapshot::capture(self, ch));
+                self.running = false;
+            }
+            OpCode::Halt => {
                 self.running = false;
             }
 

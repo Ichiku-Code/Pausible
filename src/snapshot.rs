@@ -3,6 +3,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::collections::HashMap;
+use crate::io::{HandleId, IoHandle, IoStrategy};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::heap::{Heap, HeapObject};
@@ -12,7 +13,7 @@ use crate::vm::{CallFrame, VM};
 // -- header constants --
 
 const MAGIC: [u8; 4] = *b"PAUS";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 // Value type tags (mirrors serialize.rs wire format).
 const TAG_INT: u8 = 0x00;
@@ -82,6 +83,8 @@ pub struct Snapshot {
     /// Raw bytes of the serialized frames section.
     frames_data: Vec<u8>,
     /// Raw bytes of the serialized stack section.
+    /// Raw bytes of the serialized I/O handles section.
+    io_section: Vec<u8>,
     stack_data: Vec<u8>,
     /// Mapping from original Gc index → position in the heap section
     /// (populated during capture; the reverse map pos→Gc is built
@@ -102,7 +105,26 @@ pub struct SnapshotHeader {
     heap_count: u32,
     frame_count: u32,
     stack_count: u32,
+    /// Number of serialized I/O handles. Zero for old snapshots.
+    io_handle_count: u32,
 }
+/// Serialised form of a single I/O handle inside a snapshot.
+#[derive(Debug, Clone)]
+pub struct IoHandleSnapshot {
+    pub id: u32,
+    /// Kind tag: 0=File, 1=TcpStream, 2=HttpConnection, 3=Timer,
+    ///            4=Stdin, 5=Stdout, 6=Stderr.
+    pub kind: u8,
+    /// Strategy tag: 0=Replay, 1=Seek, 2=Cached.
+    pub strategy: u8,
+    /// Serialised reconnect parameters (path, addr, url, etc.).
+    pub params: Vec<u8>,
+    /// Cached data for Ephemeral handles.
+    pub cached: Option<Vec<u8>>,
+    /// File position for Seekable handles.
+    pub position: Option<u64>,
+}
+
 
 impl Snapshot {
     // -- binary helpers (identical to chunk.rs pattern) --
@@ -191,6 +213,14 @@ impl Snapshot {
             Self::write_value_ref(&mut stack_buf, val, &gc_to_pos, &vm.heap);
         }
 
+        // 4.5. Serialize I/O handles.
+        let mut io_buf: Vec<u8> = Vec::new();
+        let io_count = vm.handles.len() as u32;
+        Self::write_u32(&mut io_buf, io_count);
+        for (&id, handle) in &vm.handles {
+            Self::serialize_io_handle_snapshot(&mut io_buf, id, handle);
+        }
+
         // 5. Assemble header.
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -205,6 +235,7 @@ impl Snapshot {
             heap_count,
             frame_count: vm.frames.len() as u32,
             stack_count: vm.stack.len() as u32,
+            io_handle_count: io_count,
         };
 
         Snapshot {
@@ -212,6 +243,7 @@ impl Snapshot {
             heap_data: heap_buf,
             frames_data: frames_buf,
             stack_data: stack_buf,
+            io_section: io_buf,
             gc_to_pos,
         }
     }
@@ -234,11 +266,13 @@ impl Snapshot {
         Self::write_u32(&mut buf, self.header.heap_count);
         Self::write_u32(&mut buf, self.header.frame_count);
         Self::write_u32(&mut buf, self.header.stack_count);
+        Self::write_u32(&mut buf, self.header.io_handle_count);
 
         // Sections
         buf.extend_from_slice(&self.heap_data);
         buf.extend_from_slice(&self.frames_data);
         buf.extend_from_slice(&self.stack_data);
+        buf.extend_from_slice(&self.io_section);
 
         std::fs::write(path, &buf).map_err(|e| SnapshotError::IoError(e.to_string()))
     }
@@ -273,7 +307,7 @@ impl Snapshot {
         pos += 4;
 
         let version = Self::read_u32(data, &mut pos)?;
-        if version != VERSION {
+        if version > VERSION {
             return Err(SnapshotError::UnsupportedVersion(version));
         }
 
@@ -282,6 +316,12 @@ impl Snapshot {
         let heap_count = Self::read_u32(data, &mut pos)?;
         let frame_count = Self::read_u32(data, &mut pos)?;
         let stack_count = Self::read_u32(data, &mut pos)?;
+        // Backward compat: v1 snapshots have no io_handle_count field.
+        let io_handle_count = if version >= 2 {
+            Self::read_u32(data, &mut pos)?
+        } else {
+            0
+        };
 
         // Read heap section: each object is self-describing.
         let heap_start = pos;
@@ -306,6 +346,18 @@ impl Snapshot {
         }
         let stack_data = data[stack_start..pos].to_vec();
 
+        // Read I/O section: count(u32) then io entries.
+        let io_section = if io_handle_count > 0 {
+            let io_start = pos;
+            let _io_count_data = Self::read_u32(data, &mut pos)?;
+            for _ in 0..io_handle_count {
+                Self::skip_io_entry(data, &mut pos)?;
+            }
+            data[io_start..pos].to_vec()
+        } else {
+            Vec::new()
+        };
+
         let header = SnapshotHeader {
             magic,
             version,
@@ -314,6 +366,7 @@ impl Snapshot {
             heap_count,
             frame_count,
             stack_count,
+            io_handle_count,
         };
 
         Ok(Snapshot {
@@ -321,6 +374,7 @@ impl Snapshot {
             heap_data,
             frames_data,
             stack_data,
+            io_section,
             gc_to_pos: HashMap::new(),
         })
     }
@@ -379,6 +433,114 @@ impl Snapshot {
             Self::skip_value(data, pos)?;
         }
         Ok(())
+    }
+
+    /// Skip past one I/O handle entry.
+    fn skip_io_entry(data: &[u8], pos: &mut usize) -> Result<(), SnapshotError> {
+        // id(u32) + kind(u8) + strategy(u8) + params_len(u32)
+        *pos = pos.checked_add(10).ok_or(SnapshotError::UnexpectedEof)?;
+        let params_offset = pos.checked_sub(6).ok_or(SnapshotError::UnexpectedEof)?;
+        let params_len = u32::from_le_bytes(
+            data.get(params_offset..params_offset + 4)
+                .ok_or(SnapshotError::UnexpectedEof)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        *pos = pos.checked_add(params_len).ok_or(SnapshotError::UnexpectedEof)?;
+        // cached_len(u32)
+        let cached_len = Self::read_u32(data, pos)? as usize;
+        *pos = pos.checked_add(cached_len).ok_or(SnapshotError::UnexpectedEof)?;
+        // position(u64) — always present, 0xFFFF_FFFF_FFFF_FFFF means None
+        *pos = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
+        Ok(())
+    }
+
+    /// Serialize an I/O handle into a snapshot entry.
+    fn serialize_io_handle_snapshot(buf: &mut Vec<u8>, id: HandleId, handle: &IoHandle) {
+        use IoHandle::*;
+        Self::write_u32(buf, id.0);
+        let (kind, strategy, params, cached, position) = match handle {
+            File { path, mode, position, strategy, cached, .. } => {
+                let mut p = Vec::new();
+                let path_bytes = path.as_bytes();
+                Self::write_u32(&mut p, path_bytes.len() as u32);
+                p.extend_from_slice(path_bytes);
+                p.push(*mode as u8);
+                (0u8, *strategy as u8, p, cached.clone(), Some(*position))
+            }
+            TcpStream { addr, strategy, last_request, last_response, .. } => {
+                let mut p = Vec::new();
+                let addr_bytes = addr.as_bytes();
+                Self::write_u32(&mut p, addr_bytes.len() as u32);
+                p.extend_from_slice(addr_bytes);
+                // last_request
+                if let Some(req) = last_request {
+                    Self::write_u32(&mut p, req.len() as u32);
+                    p.extend_from_slice(req);
+                } else {
+                    Self::write_u32(&mut p, 0xFFFF_FFFF);
+                }
+                // last_response
+                if let Some(resp) = last_response {
+                    Self::write_u32(&mut p, resp.len() as u32);
+                    p.extend_from_slice(resp);
+                } else {
+                    Self::write_u32(&mut p, 0xFFFF_FFFF);
+                }
+                (1u8, *strategy as u8, p, None, None)
+            }
+            HttpConnection { url, method, body, last_response, strategy, .. } => {
+                let mut p = Vec::new();
+                let url_bytes = url.as_bytes();
+                Self::write_u32(&mut p, url_bytes.len() as u32);
+                p.extend_from_slice(url_bytes);
+                p.push(*method as u8);
+                if let Some(b) = body {
+                    Self::write_u32(&mut p, b.len() as u32);
+                    p.extend_from_slice(b);
+                } else {
+                    Self::write_u32(&mut p, 0xFFFF_FFFF);
+                }
+                if let Some(resp) = last_response {
+                    Self::write_u32(&mut p, resp.len() as u32);
+                    p.extend_from_slice(resp);
+                } else {
+                    Self::write_u32(&mut p, 0xFFFF_FFFF);
+                }
+                (2u8, *strategy as u8, p, None, None)
+            }
+            Timer { ms, strategy, .. } => {
+                let mut p = Vec::new();
+                p.extend_from_slice(&ms.to_le_bytes());
+                (3u8, *strategy as u8, p, None, None)
+            }
+            Stdin { buffer } => {
+                (4u8, IoStrategy::Cached as u8, Vec::new(), Some(buffer.clone()), None)
+            }
+            Stdout { buffer } => {
+                (5u8, IoStrategy::Cached as u8, Vec::new(), Some(buffer.clone()), None)
+            }
+            Stderr { buffer } => {
+                (6u8, IoStrategy::Cached as u8, Vec::new(), Some(buffer.clone()), None)
+            }
+        };
+        Self::write_u8(buf, kind);
+        Self::write_u8(buf, strategy);
+        Self::write_u32(buf, params.len() as u32);
+        buf.extend_from_slice(&params);
+        // cached
+        if let Some(c) = &cached {
+            Self::write_u32(buf, c.len() as u32);
+            buf.extend_from_slice(c);
+        } else {
+            Self::write_u32(buf, 0xFFFF_FFFF);
+        }
+        // position — sentinel for None
+        if let Some(pos) = position {
+            buf.extend_from_slice(&pos.to_le_bytes());
+        } else {
+            buf.extend_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
+        }
     }
 
     // -- restore --
