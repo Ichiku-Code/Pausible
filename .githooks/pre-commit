@@ -1,0 +1,25 @@
+#!/bin/sh
+# Pre-commit hook: rustfmt + clippy checks.
+
+if ! git diff --cached --name-only --diff-filter=ACM | grep -q '\.rs$'; then
+    exit 0
+fi
+
+echo ""
+echo "==> Running cargo fmt --check..."
+
+if ! cargo fmt --check; then
+    echo ""
+    echo "cargo fmt found unformatted code. Run 'cargo fmt' and stage the changes."
+    exit 1
+fi
+
+echo "==> Running cargo clippy..."
+
+if ! cargo clippy --tests -- -D warnings -W clippy::pedantic 2>&1; then
+    echo ""
+    echo "clippy warnings must be zero before committing."
+    exit 1
+fi
+
+echo "==> All checks passed."

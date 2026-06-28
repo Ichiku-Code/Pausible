@@ -32,7 +32,7 @@
 cargo clippy --tests -- -W clippy::pedantic
 ```
 
-提交时 .git/hooks/pre-commit 自动运行 cargo fmt --check 和 clippy，不通过则拒绝提交。
+提交时 `.githooks/pre-commit` 自动运行 cargo fmt --check 和 clippy，不通过则拒绝提交。首次克隆后需执行 `git config core.hooksPath .githooks` 启用。
 
 ## 常见陷阱
 
