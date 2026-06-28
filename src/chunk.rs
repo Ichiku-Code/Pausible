@@ -975,7 +975,9 @@ mod tests {
                 OpCode::StdinRead,
                 OpCode::StdoutWrite,
                 OpCode::StderrWrite,
-                OpCode::TimerSleep { ms: Value::Int(500) },
+                OpCode::TimerSleep {
+                    ms: Value::Int(500),
+                },
                 OpCode::Halt,
             ],
             0,

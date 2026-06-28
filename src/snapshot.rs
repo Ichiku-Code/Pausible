@@ -2,8 +2,8 @@
 // practical programs fit comfortably within a 32-bit range.
 #![allow(clippy::cast_possible_truncation)]
 
-use std::collections::HashMap;
 use crate::io::{HandleId, IoHandle, IoStrategy};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::heap::{Heap, HeapObject};
@@ -124,7 +124,6 @@ pub struct IoHandleSnapshot {
     /// File position for Seekable handles.
     pub position: Option<u64>,
 }
-
 
 impl Snapshot {
     // -- binary helpers (identical to chunk.rs pattern) --
@@ -446,21 +445,33 @@ impl Snapshot {
                 .try_into()
                 .unwrap(),
         ) as usize;
-        *pos = pos.checked_add(params_len).ok_or(SnapshotError::UnexpectedEof)?;
+        *pos = pos
+            .checked_add(params_len)
+            .ok_or(SnapshotError::UnexpectedEof)?;
         // cached_len(u32)
         let cached_len = Self::read_u32(data, pos)? as usize;
-        *pos = pos.checked_add(cached_len).ok_or(SnapshotError::UnexpectedEof)?;
+        *pos = pos
+            .checked_add(cached_len)
+            .ok_or(SnapshotError::UnexpectedEof)?;
         // position(u64) — always present, 0xFFFF_FFFF_FFFF_FFFF means None
         *pos = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
         Ok(())
     }
 
     /// Serialize an I/O handle into a snapshot entry.
+    #[allow(clippy::too_many_lines)]
     fn serialize_io_handle_snapshot(buf: &mut Vec<u8>, id: HandleId, handle: &IoHandle) {
-        use IoHandle::*;
+        use IoHandle::{File, HttpConnection, Stderr, Stdin, Stdout, TcpStream, Timer};
         Self::write_u32(buf, id.0);
         let (kind, strategy, params, cached, position) = match handle {
-            File { path, mode, position, strategy, cached, .. } => {
+            File {
+                path,
+                mode,
+                position,
+                strategy,
+                cached,
+                ..
+            } => {
                 let mut p = Vec::new();
                 let path_bytes = path.as_bytes();
                 Self::write_u32(&mut p, path_bytes.len() as u32);
@@ -468,7 +479,13 @@ impl Snapshot {
                 p.push(*mode as u8);
                 (0u8, *strategy as u8, p, cached.clone(), Some(*position))
             }
-            TcpStream { addr, strategy, last_request, last_response, .. } => {
+            TcpStream {
+                addr,
+                strategy,
+                last_request,
+                last_response,
+                ..
+            } => {
                 let mut p = Vec::new();
                 let addr_bytes = addr.as_bytes();
                 Self::write_u32(&mut p, addr_bytes.len() as u32);
@@ -489,7 +506,14 @@ impl Snapshot {
                 }
                 (1u8, *strategy as u8, p, None, None)
             }
-            HttpConnection { url, method, body, last_response, strategy, .. } => {
+            HttpConnection {
+                url,
+                method,
+                body,
+                last_response,
+                strategy,
+                ..
+            } => {
                 let mut p = Vec::new();
                 let url_bytes = url.as_bytes();
                 Self::write_u32(&mut p, url_bytes.len() as u32);
@@ -514,15 +538,27 @@ impl Snapshot {
                 p.extend_from_slice(&ms.to_le_bytes());
                 (3u8, *strategy as u8, p, None, None)
             }
-            Stdin { buffer } => {
-                (4u8, IoStrategy::Cached as u8, Vec::new(), Some(buffer.clone()), None)
-            }
-            Stdout { buffer } => {
-                (5u8, IoStrategy::Cached as u8, Vec::new(), Some(buffer.clone()), None)
-            }
-            Stderr { buffer } => {
-                (6u8, IoStrategy::Cached as u8, Vec::new(), Some(buffer.clone()), None)
-            }
+            Stdin { buffer } => (
+                4u8,
+                IoStrategy::Cached as u8,
+                Vec::new(),
+                Some(buffer.clone()),
+                None,
+            ),
+            Stdout { buffer } => (
+                5u8,
+                IoStrategy::Cached as u8,
+                Vec::new(),
+                Some(buffer.clone()),
+                None,
+            ),
+            Stderr { buffer } => (
+                6u8,
+                IoStrategy::Cached as u8,
+                Vec::new(),
+                Some(buffer.clone()),
+                None,
+            ),
         };
         Self::write_u8(buf, kind);
         Self::write_u8(buf, strategy);

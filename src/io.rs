@@ -145,11 +145,17 @@ impl IoHandle {
     }
 }
 
-
 impl Clone for IoHandle {
     fn clone(&self) -> Self {
         match self {
-            Self::File { path, mode, position, strategy, cached, .. } => Self::File {
+            Self::File {
+                path,
+                mode,
+                position,
+                strategy,
+                cached,
+                ..
+            } => Self::File {
                 path: path.clone(),
                 mode: *mode,
                 position: *position,
@@ -157,24 +163,45 @@ impl Clone for IoHandle {
                 file: None,
                 cached: cached.clone(),
             },
-            Self::TcpStream { addr, strategy, last_request, last_response, .. } => Self::TcpStream {
+            Self::TcpStream {
+                addr,
+                strategy,
+                last_request,
+                last_response,
+                ..
+            } => Self::TcpStream {
                 addr: addr.clone(),
                 strategy: *strategy,
                 stream: None,
                 last_request: last_request.clone(),
                 last_response: last_response.clone(),
             },
-            Self::HttpConnection { url, method, body, last_response, strategy } => Self::HttpConnection {
+            Self::HttpConnection {
+                url,
+                method,
+                body,
+                last_response,
+                strategy,
+            } => Self::HttpConnection {
                 url: url.clone(),
                 method: *method,
                 body: body.clone(),
                 last_response: last_response.clone(),
                 strategy: *strategy,
             },
-            Self::Timer { ms, strategy } => Self::Timer { ms: *ms, strategy: *strategy },
-            Self::Stdin { buffer } => Self::Stdin { buffer: buffer.clone() },
-            Self::Stdout { buffer } => Self::Stdout { buffer: buffer.clone() },
-            Self::Stderr { buffer } => Self::Stderr { buffer: buffer.clone() },
+            Self::Timer { ms, strategy } => Self::Timer {
+                ms: *ms,
+                strategy: *strategy,
+            },
+            Self::Stdin { buffer } => Self::Stdin {
+                buffer: buffer.clone(),
+            },
+            Self::Stdout { buffer } => Self::Stdout {
+                buffer: buffer.clone(),
+            },
+            Self::Stderr { buffer } => Self::Stderr {
+                buffer: buffer.clone(),
+            },
         }
     }
 }
@@ -221,8 +248,8 @@ mod tests {
             mode: FileMode::Read,
             position: 0,
             strategy: IoStrategy::Seek,
-                file: None,
-                cached: None,
+            file: None,
+            cached: None,
         };
         assert_eq!(h.strategy(), IoStrategy::Seek);
         assert_eq!(h.kind_name(), "File");
@@ -259,7 +286,7 @@ mod tests {
             body: None,
             last_response: Some(b"{\"ok\":true}".to_vec()),
             strategy: IoStrategy::Replay,
-                    };
+        };
         assert_eq!(h.strategy(), IoStrategy::Replay);
         assert_eq!(h.kind_name(), "HttpConnection");
     }
@@ -269,7 +296,7 @@ mod tests {
         let h = IoHandle::Timer {
             ms: 5000,
             strategy: IoStrategy::Replay,
-                    };
+        };
         assert_eq!(h.strategy(), IoStrategy::Replay);
         assert_eq!(h.kind_name(), "Timer");
     }
@@ -279,9 +306,9 @@ mod tests {
         let h = IoHandle::TcpStream {
             addr: "127.0.0.1:8080".into(),
             strategy: IoStrategy::Replay,
-                stream: None,
-                last_request: None,
-                last_response: None
+            stream: None,
+            last_request: None,
+            last_response: None,
         };
         assert_eq!(h.strategy(), IoStrategy::Replay);
         assert_eq!(h.kind_name(), "TcpStream");
@@ -297,8 +324,8 @@ mod tests {
                     mode: FileMode::Read,
                     position: 0,
                     strategy: IoStrategy::Seek,
-                file: None,
-                cached: None,
+                    file: None,
+                    cached: None,
                 },
             ),
             (
@@ -306,9 +333,9 @@ mod tests {
                 IoHandle::TcpStream {
                     addr: "x".into(),
                     strategy: IoStrategy::Replay,
-                stream: None,
-                last_request: None,
-                last_response: None
+                    stream: None,
+                    last_request: None,
+                    last_response: None,
                 },
             ),
             (
@@ -319,14 +346,14 @@ mod tests {
                     body: None,
                     last_response: None,
                     strategy: IoStrategy::Replay,
-                                    },
+                },
             ),
             (
                 "Timer",
                 IoHandle::Timer {
                     ms: 0,
                     strategy: IoStrategy::Replay,
-                                    },
+                },
             ),
             ("Stdin", IoHandle::Stdin { buffer: vec![] }),
             ("Stdout", IoHandle::Stdout { buffer: vec![] }),
@@ -347,7 +374,13 @@ mod tests {
             cached: Some(b"cached data".to_vec()),
         };
         let cloned = h.clone();
-        if let IoHandle::File { file, cached, position, .. } = cloned {
+        if let IoHandle::File {
+            file,
+            cached,
+            position,
+            ..
+        } = cloned
+        {
             assert!(file.is_none(), "cloned File should have file=None");
             assert_eq!(position, 42);
             assert_eq!(cached, Some(b"cached data".to_vec()));
@@ -366,7 +399,13 @@ mod tests {
             last_response: Some(b"resp".to_vec()),
         };
         let cloned = h.clone();
-        if let IoHandle::TcpStream { stream, last_request, last_response, .. } = cloned {
+        if let IoHandle::TcpStream {
+            stream,
+            last_request,
+            last_response,
+            ..
+        } = cloned
+        {
             assert!(stream.is_none(), "cloned TcpStream should have stream=None");
             assert_eq!(last_request, Some(b"req".to_vec()));
             assert_eq!(last_response, Some(b"resp".to_vec()));
@@ -385,7 +424,14 @@ mod tests {
             strategy: IoStrategy::Replay,
         };
         let cloned = h.clone();
-        if let IoHandle::HttpConnection { url, method, body, last_response, strategy } = cloned {
+        if let IoHandle::HttpConnection {
+            url,
+            method,
+            body,
+            last_response,
+            strategy,
+        } = cloned
+        {
             assert_eq!(url, "https://example.com");
             assert_eq!(method, HttpMethod::Post);
             assert_eq!(body, Some(b"payload".to_vec()));

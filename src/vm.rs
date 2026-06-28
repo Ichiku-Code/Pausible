@@ -7,11 +7,11 @@ use core::fmt;
 use crate::function::Function;
 use crate::heap::{Gc, Heap, ListObj, StringObj};
 use crate::io::{HandleId, IoHandle, IoStrategy};
-use crate::snapshot::Snapshot;
-use std::net::TcpStream;
 use crate::opcode::OpCode;
+use crate::snapshot::Snapshot;
 use crate::value::{TypeError, Value};
 use std::collections::HashMap;
+use std::net::TcpStream;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeapError {
@@ -528,7 +528,9 @@ impl VM {
                         let id = self.create_handle(handle);
                         self.stack.push(Value::Int(i64::from(id.0)));
                     }
-                    Err(e) => return Err(VmError::IoError(format!("TCP connect to {addr_str}: {e}"))),
+                    Err(e) => {
+                        return Err(VmError::IoError(format!("TCP connect to {addr_str}: {e}")));
+                    }
                 }
             }
             OpCode::TcpRead(h) => {
@@ -579,28 +581,37 @@ impl VM {
         use std::io::{Read, Seek};
         // Strategy-aware: check for cached data first
         let (path, strategy, cached) = match self.handles.get(&h) {
-            Some(IoHandle::File { path, strategy, cached, .. }) => {
-                (path.clone(), *strategy, cached.clone())
-            }
+            Some(IoHandle::File {
+                path,
+                strategy,
+                cached,
+                ..
+            }) => (path.clone(), *strategy, cached.clone()),
             _ => return Ok(Value::Null),
         };
 
         // Cached: return cached data if available
-        if strategy == IoStrategy::Cached {
-            if let Some(data) = cached {
-                let elements: Vec<Value> =
-                    data.into_iter().map(|b| Value::Int(i64::from(b))).collect();
-                let gc = self.heap.alloc_list(elements);
-                return Ok(Value::List(gc));
-            }
+        if strategy == IoStrategy::Cached
+            && let Some(data) = cached
+        {
+            let elements: Vec<Value> = data.into_iter().map(|b| Value::Int(i64::from(b))).collect();
+            let gc = self.heap.alloc_list(elements);
+            return Ok(Value::List(gc));
         }
 
         // Seek: use stored file handle if available
         let buf = if strategy == IoStrategy::Seek {
             let mut buf = Vec::new();
             let handle = self.handles.get_mut(&h);
-            if let Some(IoHandle::File { file: Some(f), position, .. }) = handle {
-                *position = f.seek(std::io::SeekFrom::Start(*position)).unwrap_or(*position);
+            if let Some(IoHandle::File {
+                file: Some(f),
+                position,
+                ..
+            }) = handle
+            {
+                *position = f
+                    .seek(std::io::SeekFrom::Start(*position))
+                    .unwrap_or(*position);
                 f.read_to_end(&mut buf)
                     .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
                 buf
@@ -682,10 +693,14 @@ impl VM {
         }
 
         // Cache the written data for Cached strategy
-        if let Some(IoHandle::File { cached, strategy: s, .. }) = self.handles.get_mut(&h) {
-            if *s == IoStrategy::Cached {
-                *cached = Some(bytes.clone());
-            }
+        if let Some(IoHandle::File {
+            cached,
+            strategy: s,
+            ..
+        }) = self.handles.get_mut(&h)
+            && *s == IoStrategy::Cached
+        {
+            *cached = Some(bytes.clone());
         }
 
         Ok(bytes.len())
@@ -769,8 +784,10 @@ impl VM {
             buf
         };
 
-        let elements: Vec<Value> =
-            response_data.into_iter().map(|b| Value::Int(i64::from(b))).collect();
+        let elements: Vec<Value> = response_data
+            .into_iter()
+            .map(|b| Value::Int(i64::from(b)))
+            .collect();
         let gc = self.heap.alloc_list(elements);
         Ok(Value::List(gc))
     }
@@ -1689,7 +1706,10 @@ mod tests {
             "main",
             0,
             vec![
-                OpCode::FileOpen { path: Value::String(path), mode: Value::String(mode) },
+                OpCode::FileOpen {
+                    path: Value::String(path),
+                    mode: Value::String(mode),
+                },
                 OpCode::Halt,
             ],
             0,
@@ -1700,7 +1720,7 @@ mod tests {
 
         assert_eq!(vm.handle_count(), 1);
         if let Value::Int(id) = vm.stack.last().unwrap() {
-            let h = vm.get_handle(HandleId(*id as u32)).unwrap();
+            let h = vm.get_handle(HandleId((*id).try_into().unwrap())).unwrap();
             assert_eq!(h.kind_name(), "File");
         } else {
             panic!("expected Int handle ID on stack");
@@ -1719,7 +1739,10 @@ mod tests {
             "main",
             0,
             vec![
-                OpCode::FileOpen { path: Value::String(path), mode: Value::String(mode) },
+                OpCode::FileOpen {
+                    path: Value::String(path),
+                    mode: Value::String(mode),
+                },
                 OpCode::Halt,
             ],
             0,
@@ -1728,7 +1751,11 @@ mod tests {
         vm.prepare(0).unwrap();
         vm.step().unwrap();
 
-        let id = if let Value::Int(id) = vm.stack.last().unwrap() { *id as u32 } else { 0 };
+        let id = if let Value::Int(id) = vm.stack.last().unwrap() {
+            (*id).try_into().unwrap()
+        } else {
+            0
+        };
         if let IoHandle::File { mode: fmode, .. } = vm.get_handle(HandleId(id)).unwrap() {
             assert_eq!(*fmode, crate::io::FileMode::Read);
         } else {
@@ -1748,7 +1775,10 @@ mod tests {
             "main",
             0,
             vec![
-                OpCode::FileOpen { path: Value::String(path), mode: Value::String(mode) },
+                OpCode::FileOpen {
+                    path: Value::String(path),
+                    mode: Value::String(mode),
+                },
                 OpCode::FileClose(HandleId(0)),
                 OpCode::Halt,
             ],
@@ -1815,11 +1845,10 @@ mod tests {
         let result = vm.read_file_handle(h).unwrap();
         if let Value::List(gc) = result {
             let elements = &vm.heap.get(gc).unwrap().elements;
-            assert_eq!(elements, &[
-                Value::Int(0x61),
-                Value::Int(0x62),
-                Value::Int(0x63),
-            ]);
+            assert_eq!(
+                elements,
+                &[Value::Int(0x61), Value::Int(0x62), Value::Int(0x63),]
+            );
         } else {
             panic!("expected List from file read");
         }
@@ -1880,7 +1909,6 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-
     // -- Std stream tests --
 
     #[test]
@@ -1938,16 +1966,10 @@ mod tests {
     #[test]
     fn stdin_read_from_buffer() {
         let mut vm = VM::new();
-        vm.create_handle(IoHandle::Stdin { buffer: vec![72, 69, 76, 76, 79] }); // "HELLO"
-        let main = Function::new(
-            "main",
-            0,
-            vec![
-                OpCode::StdinRead,
-                OpCode::Halt,
-            ],
-            0,
-        );
+        vm.create_handle(IoHandle::Stdin {
+            buffer: vec![72, 69, 76, 76, 79],
+        }); // "HELLO"
+        let main = Function::new("main", 0, vec![OpCode::StdinRead, OpCode::Halt], 0);
         vm.add_function(main);
         vm.prepare(0).unwrap();
         vm.step().unwrap();
@@ -1999,7 +2021,9 @@ mod tests {
             0,
             vec![
                 OpCode::Push(Value::Int(1)),
-                OpCode::TimerSleep { ms: Value::Int(1000) },
+                OpCode::TimerSleep {
+                    ms: Value::Int(1000),
+                },
                 OpCode::Push(Value::Int(2)),
                 OpCode::Halt,
             ],
