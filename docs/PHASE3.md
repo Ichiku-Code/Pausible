@@ -53,7 +53,7 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 - **Yield 时自动触发 snapshot 捕获：** 修改 `OpCode::Yield` 分支，在设置 `running = false` 前调用 snapshot 逻辑
 
 ### 3.5 重连阶段
- > **状态：待实现。**
+ > **状态：已完成。**
 >
 - `ReconnectReport` 结构：每个句柄一个 `ReconnectStatus`（`Ok` / `Degraded` / `Failed`），含错误信息和状态码
 - `Snapshot::restore_into` 扩展：堆/帧/栈恢复后，进入重连阶段，逐句柄尝试重连

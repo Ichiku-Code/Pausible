@@ -66,6 +66,39 @@ impl core::fmt::Display for SnapshotError {
 }
 
 impl core::error::Error for SnapshotError {}
+// -- ReconnectStatus / ReconnectReport --
+
+/// Outcome of reconnecting a single I/O handle during resume.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReconnectStatus {
+    /// Handle reconnected successfully.
+    Ok,
+    /// Handle reconnected with degraded capability.
+    Degraded { reason: String },
+    /// Handle could not be reconnected.
+    Failed { reason: String },
+}
+
+impl ReconnectStatus {
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+}
+
+/// Collection of per-handle reconnect outcomes.
+#[derive(Debug, Clone)]
+pub struct ReconnectReport {
+    pub entries: Vec<(HandleId, ReconnectStatus)>,
+}
+
+impl ReconnectReport {
+    /// True if any entry has status `Failed`.
+    #[must_use]
+    pub fn has_failures(&self) -> bool {
+        self.entries.iter().any(|(_, s)| s.is_failed())
+    }
+}
 
 // -- Snapshot --
 
@@ -577,6 +610,371 @@ impl Snapshot {
         } else {
             buf.extend_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
         }
+    }
+
+    /// Deserialize a single I/O handle snapshot from bytes at the given position.
+    fn deserialize_io_handle_snapshot(
+        data: &[u8],
+        pos: &mut usize,
+    ) -> Result<IoHandleSnapshot, SnapshotError> {
+        let id = Self::read_u32(data, pos)?;
+        let kind = Self::read_u8(data, pos)?;
+        let strategy = Self::read_u8(data, pos)?;
+        let params_len = Self::read_u32(data, pos)? as usize;
+        let params_end = pos
+            .checked_add(params_len)
+            .ok_or(SnapshotError::UnexpectedEof)?;
+        let params = data
+            .get(*pos..params_end)
+            .ok_or(SnapshotError::UnexpectedEof)?
+            .to_vec();
+        *pos = params_end;
+
+        let cached_len = Self::read_u32(data, pos)? as usize;
+        let cached = if cached_len == 0xFFFF_FFFF {
+            None
+        } else {
+            let end = pos
+                .checked_add(cached_len)
+                .ok_or(SnapshotError::UnexpectedEof)?;
+            let bytes = data
+                .get(*pos..end)
+                .ok_or(SnapshotError::UnexpectedEof)?
+                .to_vec();
+            *pos = end;
+            Some(bytes)
+        };
+
+        let position_raw = Self::read_u64(data, pos)?;
+        let position = if position_raw == 0xFFFF_FFFF_FFFF_FFFF {
+            None
+        } else {
+            Some(position_raw)
+        };
+
+        Ok(IoHandleSnapshot {
+            id,
+            kind,
+            strategy,
+            params,
+            cached,
+            position,
+        })
+    }
+
+    /// Restore I/O handles from the snapshot into the VM, attempting
+    /// reconnection for each handle.
+    ///
+    /// Returns a `ReconnectReport` with the outcome for every handle.
+    #[must_use]
+    pub fn restore_io_handles(&self, vm: &mut VM) -> ReconnectReport {
+        use crate::io::IoStrategy;
+
+        let mut report = ReconnectReport {
+            entries: Vec::new(),
+        };
+
+        if self.header.io_handle_count == 0 {
+            return report;
+        }
+
+        let mut pos: usize = 0;
+        let Ok(io_count) = Self::read_u32(&self.io_section, &mut pos) else {
+            return report;
+        };
+
+        for _ in 0..io_count {
+            let Ok(snap) = Self::deserialize_io_handle_snapshot(&self.io_section, &mut pos) else {
+                continue;
+            };
+            let hid = HandleId(snap.id);
+            let strategy = match snap.strategy {
+                0 => IoStrategy::Replay,
+                1 => IoStrategy::Seek,
+                _ => IoStrategy::Cached,
+            };
+
+            let (handle, status) = Self::reconnect_handle(&snap, strategy);
+            vm.register_handle(hid, handle);
+            report.entries.push((hid, status));
+        }
+
+        report
+    }
+
+    /// Attempt to re-create and reconnect a single I/O handle from its
+    /// serialised snapshot.
+    #[allow(clippy::too_many_lines)]
+    fn reconnect_handle(
+        snap: &IoHandleSnapshot,
+        strategy: IoStrategy,
+    ) -> (IoHandle, ReconnectStatus) {
+        use crate::io::{FileMode, HttpMethod, IoHandle};
+
+        match snap.kind {
+            0 => {
+                // File
+                let mut ppos: usize = 0;
+                let path_len = Self::read_u32_or(&snap.params, &mut ppos, 0) as usize;
+                let path = String::from_utf8_lossy(
+                    snap.params
+                        .get(ppos..ppos.saturating_add(path_len))
+                        .unwrap_or(b""),
+                )
+                .into_owned();
+                ppos = ppos.saturating_add(path_len);
+                let mode = if ppos < snap.params.len() {
+                    match snap.params[ppos] {
+                        0 => FileMode::Read,
+                        1 => FileMode::Write,
+                        _ => FileMode::Append,
+                    }
+                } else {
+                    FileMode::Read
+                };
+                let position = snap.position.unwrap_or(0);
+
+                match std::fs::File::open(&path) {
+                    Ok(mut f) => {
+                        use std::io::Seek;
+                        if let Err(e) = f.seek(std::io::SeekFrom::Start(position)) {
+                            (
+                                IoHandle::File {
+                                    path,
+                                    mode,
+                                    position: 0,
+                                    strategy,
+                                    file: None,
+                                    cached: snap.cached.clone(),
+                                },
+                                ReconnectStatus::Degraded {
+                                    reason: format!("seek failed: {e}"),
+                                },
+                            )
+                        } else {
+                            (
+                                IoHandle::File {
+                                    path,
+                                    mode,
+                                    position,
+                                    strategy,
+                                    file: Some(f),
+                                    cached: snap.cached.clone(),
+                                },
+                                ReconnectStatus::Ok,
+                            )
+                        }
+                    }
+                    Err(e) => (
+                        IoHandle::File {
+                            path,
+                            mode,
+                            position,
+                            strategy,
+                            file: None,
+                            cached: snap.cached.clone(),
+                        },
+                        ReconnectStatus::Failed {
+                            reason: format!("file open failed: {e}"),
+                        },
+                    ),
+                }
+            }
+            1 => {
+                // TcpStream
+                let mut tpos: usize = 0;
+                let addr_len = Self::read_u32_or(&snap.params, &mut tpos, 0) as usize;
+                let addr = String::from_utf8_lossy(
+                    snap.params
+                        .get(tpos..tpos.saturating_add(addr_len))
+                        .unwrap_or(b""),
+                )
+                .into_owned();
+                tpos = tpos.saturating_add(addr_len);
+                let _ = tpos;
+
+                match std::net::TcpStream::connect(&addr) {
+                    Ok(stream) => (
+                        IoHandle::TcpStream {
+                            addr,
+                            strategy,
+                            stream: Some(stream),
+                            last_request: None,
+                            last_response: None,
+                        },
+                        ReconnectStatus::Ok,
+                    ),
+                    Err(e) => (
+                        IoHandle::TcpStream {
+                            addr,
+                            strategy,
+                            stream: None,
+                            last_request: None,
+                            last_response: None,
+                        },
+                        ReconnectStatus::Failed {
+                            reason: format!("TCP connect failed: {e}"),
+                        },
+                    ),
+                }
+            }
+            2 => {
+                // HttpConnection — replay the original request and compare.
+                let mut hpos: usize = 0;
+                let url_len = Self::read_u32_or(&snap.params, &mut hpos, 0) as usize;
+                let url = String::from_utf8_lossy(
+                    snap.params
+                        .get(hpos..hpos.saturating_add(url_len))
+                        .unwrap_or(b""),
+                )
+                .into_owned();
+                hpos = hpos.saturating_add(url_len);
+                let method = if hpos < snap.params.len() {
+                    match snap.params[hpos] {
+                        1 => HttpMethod::Post,
+                        _ => HttpMethod::Get,
+                    }
+                } else {
+                    HttpMethod::Get
+                };
+                hpos = hpos.saturating_add(1);
+
+                // Parse body from params (None sentinel = 0xFFFF_FFFF).
+                let body_len = Self::read_u32_or(&snap.params, &mut hpos, 0xFFFF_FFFF) as usize;
+                let body = if body_len == 0xFFFF_FFFF as usize {
+                    None
+                } else {
+                    let end = hpos.saturating_add(body_len);
+                    let bytes = snap
+                        .params
+                        .get(hpos..end.min(snap.params.len()))
+                        .unwrap_or(b"")
+                        .to_vec();
+                    hpos = end;
+                    Some(bytes)
+                };
+
+                // Parse old last_response from params (None sentinel = 0xFFFF_FFFF).
+                let old_resp_len = Self::read_u32_or(&snap.params, &mut hpos, 0xFFFF_FFFF) as usize;
+                let old_response = if old_resp_len == 0xFFFF_FFFF as usize {
+                    None
+                } else {
+                    let end = hpos.saturating_add(old_resp_len);
+                    let bytes = snap
+                        .params
+                        .get(hpos..end.min(snap.params.len()))
+                        .unwrap_or(b"")
+                        .to_vec();
+                    let _ = hpos;
+                    Some(bytes)
+                };
+
+                // Replay the HTTP request.
+                let result: Result<Vec<u8>, String> = (|| {
+                    let resp = match method {
+                        HttpMethod::Post => {
+                            let agent = ureq::agent();
+                            agent
+                                .post(&url)
+                                .set("Content-Type", "application/octet-stream")
+                                .send_bytes(body.as_deref().unwrap_or(&[]))
+                                .map_err(|e| e.to_string())?
+                        }
+                        HttpMethod::Get => ureq::get(&url).call().map_err(|e| e.to_string())?,
+                    };
+
+                    let mut new_body = Vec::new();
+                    resp.into_reader()
+                        .read_to_end(&mut new_body)
+                        .map_err(|e| e.to_string())?;
+                    Ok(new_body)
+                })();
+
+                match result {
+                    Ok(new_response) => {
+                        let status = match &old_response {
+                            Some(old) if old != &new_response => ReconnectStatus::Degraded {
+                                reason: "DataDiverged: response differs from snapshot".into(),
+                            },
+                            _ => ReconnectStatus::Ok,
+                        };
+                        (
+                            IoHandle::HttpConnection {
+                                url,
+                                method,
+                                body,
+                                last_response: Some(new_response),
+                                strategy,
+                            },
+                            status,
+                        )
+                    }
+                    Err(e) => (
+                        IoHandle::HttpConnection {
+                            url,
+                            method,
+                            body,
+                            last_response: old_response,
+                            strategy,
+                        },
+                        ReconnectStatus::Failed {
+                            reason: format!("HTTP replay failed: {e}"),
+                        },
+                    ),
+                }
+            }
+            3 => {
+                // Timer — always ok, just restore ms
+                let ms = if snap.params.len() >= 8 {
+                    u64::from_le_bytes(snap.params[..8].try_into().unwrap_or([0u8; 8]))
+                } else {
+                    0
+                };
+                (IoHandle::Timer { ms, strategy }, ReconnectStatus::Ok)
+            }
+            4 => {
+                // Stdin — always ok, restore cached buffer
+                (
+                    IoHandle::Stdin {
+                        buffer: snap.cached.clone().unwrap_or_default(),
+                    },
+                    ReconnectStatus::Ok,
+                )
+            }
+            5 => {
+                // Stdout — always ok
+                (
+                    IoHandle::Stdout {
+                        buffer: snap.cached.clone().unwrap_or_default(),
+                    },
+                    ReconnectStatus::Ok,
+                )
+            }
+            6 => {
+                // Stderr — always ok
+                (
+                    IoHandle::Stderr {
+                        buffer: snap.cached.clone().unwrap_or_default(),
+                    },
+                    ReconnectStatus::Ok,
+                )
+            }
+            _ => (
+                IoHandle::Stdin { buffer: Vec::new() },
+                ReconnectStatus::Failed {
+                    reason: format!("unknown handle kind: {}", snap.kind),
+                },
+            ),
+        }
+    }
+
+    fn read_u32_or(data: &[u8], pos: &mut usize, default: u32) -> u32 {
+        if *pos + 4 > data.len() {
+            return default;
+        }
+        let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap_or([0u8; 4]));
+        *pos += 4;
+        val
     }
 
     // -- restore --

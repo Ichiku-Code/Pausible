@@ -95,6 +95,8 @@ impl core::error::Error for VmError {}
 pub enum ResumeError {
     /// Snapshot restoration failed.
     Snapshot(String),
+    /// One or more I/O handles could not be reconnected.
+    Reconnect(String),
     /// VM execution failed after restore.
     Vm(VmError),
 }
@@ -103,12 +105,21 @@ impl fmt::Display for ResumeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Snapshot(msg) => write!(f, "resume snapshot error: {msg}"),
+            Self::Reconnect(msg) => write!(f, "reconnect failed: {msg}"),
             Self::Vm(e) => write!(f, "resume VM error: {e}"),
         }
     }
 }
 
 impl core::error::Error for ResumeError {}
+
+/// Placeholder for Phase 5 `yield resume { ... }` syntax.
+/// Currently only `Strict` is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconnectPolicy {
+    /// Any non-optional handle failure terminates the resume.
+    Strict,
+}
 
 /// The Pausible stack-based virtual machine.
 #[derive(Debug, Clone)]
@@ -206,6 +217,11 @@ impl VM {
         id
     }
 
+    /// Register an I/O handle with a pre-assigned id (used during snapshot restore).
+    pub fn register_handle(&mut self, id: HandleId, handle: IoHandle) {
+        self.next_handle_id = self.next_handle_id.max(id.0.wrapping_add(1));
+        self.handles.insert(id, handle);
+    }
     /// Borrow a registered I/O handle by id.
     #[must_use]
     pub fn get_handle(&self, id: HandleId) -> Option<&IoHandle> {
@@ -328,6 +344,16 @@ impl VM {
     pub fn resume(&mut self, snap: &crate::snapshot::Snapshot) -> Result<(), ResumeError> {
         self.restore_snapshot(snap)
             .map_err(|e| ResumeError::Snapshot(e.to_string()))?;
+        let report = snap.restore_io_handles(self);
+        if report.has_failures() {
+            let failed: Vec<String> = report
+                .entries
+                .iter()
+                .filter(|(_, s)| s.is_failed())
+                .map(|(id, s)| format!("{id}: {s:?}"))
+                .collect();
+            return Err(ResumeError::Reconnect(failed.join("; ")));
+        }
         self.run().map_err(ResumeError::Vm)
     }
 
