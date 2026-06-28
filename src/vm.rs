@@ -6,7 +6,7 @@ use core::fmt;
 
 use crate::function::Function;
 use crate::heap::{Gc, Heap, ListObj, StringObj};
-use crate::io::{HandleId, IoHandle, IoStrategy};
+use crate::io::{FileMode, HandleId, IoHandle, IoStrategy};
 use crate::opcode::OpCode;
 use crate::snapshot::Snapshot;
 use crate::value::{TypeError, Value};
@@ -585,11 +585,11 @@ impl VM {
             }
             OpCode::StdoutWrite => {
                 let data = self.pop()?;
-                self.write_stdout(&data);
+                self.write_stdout(&data)?;
             }
             OpCode::StderrWrite => {
                 let data = self.pop()?;
-                self.write_stderr(&data);
+                self.write_stderr(&data)?;
             }
 
             // -- I/O: timer (placeholder) --
@@ -639,7 +639,7 @@ impl VM {
                     .seek(std::io::SeekFrom::Start(*position))
                     .unwrap_or(*position);
                 f.read_to_end(&mut buf)
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                    .map_err(|_| VmError::IoError("file I/O error".into()))?;
                 buf
             } else {
                 // Fallback: re-open from path for Seek if no stored handle
@@ -652,12 +652,12 @@ impl VM {
                     _ => 0,
                 };
                 let mut file = std::fs::File::open(&path_str)
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                    .map_err(|_| VmError::IoError("file I/O error".into()))?;
                 file.seek(std::io::SeekFrom::Start(pos))
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                    .map_err(|_| VmError::IoError("file I/O error".into()))?;
                 let mut buf = Vec::new();
                 file.read_to_end(&mut buf)
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                    .map_err(|_| VmError::IoError("file I/O error".into()))?;
                 // Update position after fallback read
                 if let Some(IoHandle::File { position, .. }) = self.handles.get_mut(&h) {
                     *position = pos + buf.len() as u64;
@@ -667,10 +667,10 @@ impl VM {
         } else {
             // Replay or fallback: re-open from path
             let mut file = std::fs::File::open(&path)
-                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                .map_err(|_| VmError::IoError("file I/O error".into()))?;
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)
-                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                .map_err(|_| VmError::IoError("file I/O error".into()))?;
             buf
         };
 
@@ -686,36 +686,48 @@ impl VM {
 
     fn write_file_handle(&mut self, h: HandleId, data: &Value) -> Result<usize, VmError> {
         use std::io::Write;
-        let (path, strategy) = match self.handles.get(&h) {
-            Some(IoHandle::File { path, strategy, .. }) => (path.clone(), *strategy),
-            _ => return Ok(0),
-        };
-        let bytes = value_to_bytes(data);
 
-        // Strategy-aware write: use stored file handle for Seek, otherwise re-open
+        let (path, mode, strategy) = match self.handles.get(&h) {
+            Some(IoHandle::File {
+                path,
+                mode,
+                strategy,
+                ..
+            }) => (path.clone(), *mode, *strategy),
+            _ => return Err(VmError::IoError("handle is not a File".into())),
+        };
+
+        if mode == FileMode::Read {
+            return Err(VmError::IoError("cannot write to a Read-mode file".into()));
+        }
+
+        let bytes = value_to_bytes(&self.heap, data);
+
+        let open_file = || -> Result<std::fs::File, VmError> {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true);
+            if mode == FileMode::Append {
+                opts.append(true);
+            } else {
+                opts.truncate(true);
+            }
+            opts.open(&path)
+                .map_err(|e| VmError::IoError(format!("open {path}: {e}")))
+        };
+
         if strategy == IoStrategy::Seek {
             if let Some(IoHandle::File { file: Some(f), .. }) = self.handles.get_mut(&h) {
                 f.write_all(&bytes)
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                    .map_err(|e| VmError::IoError(format!("write: {e}")))?;
             } else {
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&path)
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                let mut file = open_file()?;
                 file.write_all(&bytes)
-                    .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                    .map_err(|e| VmError::IoError(format!("write: {e}")))?;
             }
         } else {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)
-                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+            let mut file = open_file()?;
             file.write_all(&bytes)
-                .map_err(|_| VmError::HeapError(HeapError::InvalidHandle))?;
+                .map_err(|e| VmError::IoError(format!("write: {e}")))?;
         }
 
         // Cache the written data for Cached strategy
@@ -761,26 +773,26 @@ impl VM {
         Value::Null
     }
 
-    fn write_stdout(&mut self, data: &Value) {
-        let bytes = value_to_bytes(data);
-        // Write to first Stdout handle
+    fn write_stdout(&mut self, data: &Value) -> Result<(), VmError> {
+        let bytes = value_to_bytes(&self.heap, data);
         for handle in self.handles.values_mut() {
             if let IoHandle::Stdout { buffer } = handle {
                 buffer.extend_from_slice(&bytes);
-                return;
+                return Ok(());
             }
         }
+        Err(VmError::IoError("no Stdout handle registered".into()))
     }
 
-    fn write_stderr(&mut self, data: &Value) {
-        let bytes = value_to_bytes(data);
-        // Write to first Stderr handle
+    fn write_stderr(&mut self, data: &Value) -> Result<(), VmError> {
+        let bytes = value_to_bytes(&self.heap, data);
         for handle in self.handles.values_mut() {
             if let IoHandle::Stderr { buffer } = handle {
                 buffer.extend_from_slice(&bytes);
-                return;
+                return Ok(());
             }
         }
+        Err(VmError::IoError("no Stderr handle registered".into()))
     }
 
     fn tcp_read_handle(&mut self, h: HandleId) -> Result<Value, VmError> {
@@ -820,7 +832,7 @@ impl VM {
 
     fn tcp_write_handle(&mut self, h: HandleId, data: &Value) -> Result<(), VmError> {
         use std::io::Write;
-        let bytes = value_to_bytes(data);
+        let bytes = value_to_bytes(&self.heap, data);
         let handle = self
             .handles
             .get_mut(&h)
@@ -869,7 +881,7 @@ impl VM {
 
     fn http_post(&mut self, url_val: &Value, body_val: &Value) -> Result<Value, VmError> {
         let url_str = value_to_string(&self.heap, url_val);
-        let body_bytes = value_to_bytes(body_val);
+        let body_bytes = value_to_bytes(&self.heap, body_val);
         let body_str = String::from_utf8_lossy(&body_bytes);
 
         let response = ureq::post(&url_str)
@@ -923,7 +935,7 @@ impl VM {
 }
 
 /// Convert a Value to a byte vector for I/O write operations.
-fn value_to_bytes(val: &Value) -> Vec<u8> {
+fn value_to_bytes(heap: &Heap, val: &Value) -> Vec<u8> {
     match val {
         Value::Int(n) => n.to_string().into_bytes(),
         Value::Float(f) => f.to_string().into_bytes(),
@@ -935,13 +947,12 @@ fn value_to_bytes(val: &Value) -> Vec<u8> {
             }
         }
         Value::Null => b"null".to_vec(),
-        Value::String(_gc) => {
-            // GC-backed strings are checked at the VM-level; here we just
-            // return empty bytes for safety.
-            Vec::new()
-        }
+        Value::String(gc) => heap
+            .get(*gc)
+            .map(|s| s.data.as_bytes().to_vec())
+            .unwrap_or_default(),
         Value::List(_gc) => {
-            // Lists are serialized as [] for now
+            // List serialization is not yet defined for I/O; return empty.
             Vec::new()
         }
     }
