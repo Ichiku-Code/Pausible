@@ -14,6 +14,7 @@
 - 子任务继承父任务的函数表（`functions: Arc<Vec<Function>>` 共享引用）
 
 ### 4.2 Spawn 指令
+> **状态：已完成。**
 
 - `OpCode::Spawn(func_id)`：创建子任务，以指定函数为入口点
 - 子任务获得独立的操作数栈和调用帧，初始 `locals` 为空
@@ -22,6 +23,7 @@
 - 子任务的 `parent` 字段指向父任务 `TaskId`
 
 ### 4.3 任务完成与等待
+> **状态：已完成。**
 
 - `OpCode::WaitChildren`：父任务阻塞，直到所有直接子任务完成（`TaskStatus::Completed`）
 - 子任务完成时将其栈顶值作为返回值传递给父任务
@@ -58,10 +60,10 @@
 
 #### 4.7.1 基础并发测试
 
-- [ ] **spawn 单子任务 → wait → 获取返回值**：父任务 spawn 一个计算斐波那契的子任务，`WaitChildren` 后获取正确结果
-- [ ] **spawn 多子任务 → wait → 全部完成**：父任务 spawn 3 个子任务各自计算阶乘，`WaitChildren` 后验证所有返回值
-- [ ] **Yield 前子任务未完成 → 报错**：父任务 spawn 子任务后直接 yield（不 wait），验证 VM 返回错误
-- [ ] **嵌套 spawn**：父任务 spawn 子任务 A，A spawn 孙任务 B，验证三层任务树正确性
+- [x] **spawn 单子任务 → wait → 获取返回值**：父任务 spawn 一个计算斐波那契的子任务，`WaitChildren` 后获取正确结果
+- [x] **spawn 多子任务 → wait → 全部完成**：父任务 spawn 3 个子任务各自计算阶乘，`WaitChildren` 后验证所有返回值
+- [x] **Yield 前子任务未完成 → 报错**：父任务 spawn 子任务后直接 yield（不 wait），验证 VM 返回错误
+- [x] **嵌套 spawn**：父任务 spawn 子任务 A，A spawn 孙任务 B，验证三层任务树正确性
 
 #### 4.7.2 任务树 Snapshot 与恢复
 
@@ -78,7 +80,7 @@
 
 #### 4.7.4 错误路径测试
 
-- [ ] **spawn 无效 func_id → 错误**：Spawn 引用不存在的函数 ID，验证 VM 返回 `VmError::UndefinedFunction`
+- [x] **spawn 无效 func_id → 错误**：Spawn 引用不存在的函数 ID，验证 VM 返回 `VmError::UndefinedFunction`
 - [ ] **子任务执行失败不阻塞父任务 wait**：子任务运行时遇到除零错误，父任务 `WaitChildren` 应收到错误信号并传播
 - [ ] **任务树深度限制**：嵌套 spawn 超过合理深度（如 256）时返回错误，防止栈溢出
 

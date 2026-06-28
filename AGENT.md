@@ -1,4 +1,8 @@
 # Pausible — AGENT.md
+## 路线图维护
+
+完成每个 Phase 小节实现并提交后，同步更新对应 `docs/PHASEN.md` 中该小节的完成状态（添加 `> **状态：已完成。**`），并将该小节关联的测试清单项从 `- [ ]` 改为 `- [x]`。
+
 
 可暂停/恢复的字节码虚拟机，Rust edition 2024。核心流程：执行计算任务 → Yield 挂起 → Snapshot 序列化 → Resume 恢复。
 
