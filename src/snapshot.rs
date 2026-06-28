@@ -841,7 +841,7 @@ impl Snapshot {
 
                 // Parse body from params (None sentinel = 0xFFFF_FFFF).
                 let body_len = Self::read_u32_or(&snap.params, &mut hpos, 0xFFFF_FFFF) as usize;
-                let body = if body_len == 0xFFFF_FFFF as usize {
+                let body = if body_len == 0xFFFF_FFFF_usize {
                     None
                 } else {
                     let end = hpos.saturating_add(body_len);
@@ -856,7 +856,7 @@ impl Snapshot {
 
                 // Parse old last_response from params (None sentinel = 0xFFFF_FFFF).
                 let old_resp_len = Self::read_u32_or(&snap.params, &mut hpos, 0xFFFF_FFFF) as usize;
-                let old_response = if old_resp_len == 0xFFFF_FFFF as usize {
+                let old_response = if old_resp_len == 0xFFFF_FFFF_usize {
                     None
                 } else {
                     let end = hpos.saturating_add(old_resp_len);
