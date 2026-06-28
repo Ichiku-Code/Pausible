@@ -2,7 +2,7 @@
 
 可暂停/恢复的字节码虚拟机，Rust edition 2024。核心流程：执行计算任务 → Yield 挂起 → Snapshot 序列化 → Resume 恢复。
 
-项目结构：`src/` 下按模块拆分为 value、heap、vm、opcode、function、chunk、io、serialize、snapshot，通过 `lib.rs` 公开。`docs/DESIGN.md` 是整体架构设计，`docs/PHASE3.md` 是当前阶段路线图。具体模块职责和 API 从源码获取，此文件不再维护冗余的逐文件清单。
+项目结构：`src/` 下按模块拆分为 value、heap、vm、opcode、function、chunk、io、serialize、snapshot，通过 `lib.rs` 公开。`docs/DESIGN.md` 是整体架构设计，`docs/PHASE4.md` 是当前阶段路线图。具体模块职责和 API 从源码获取，此文件不再维护冗余的逐文件清单。
 
 ## 架构模式
 

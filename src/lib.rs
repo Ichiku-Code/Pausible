@@ -5,5 +5,6 @@ pub mod io;
 pub mod opcode;
 pub mod serialize;
 pub mod snapshot;
+pub mod task;
 pub mod value;
 pub mod vm;

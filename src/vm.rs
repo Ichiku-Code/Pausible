@@ -9,6 +9,7 @@ use crate::heap::{Gc, Heap, ListObj, StringObj};
 use crate::io::{FileMode, HandleId, IoHandle, IoStrategy};
 use crate::opcode::OpCode;
 use crate::snapshot::Snapshot;
+use crate::task::{Task, TaskId};
 use crate::value::{TypeError, Value};
 use std::collections::HashMap;
 use std::net::TcpStream;
@@ -138,8 +139,11 @@ pub struct VM {
     pub handles: HashMap<HandleId, IoHandle>,
     /// Snapshot captured on Yield (None before first yield).
     pub snapshot: Option<Snapshot>,
+    pub task_registry: HashMap<TaskId, Task>,
+    pub current_task_id: TaskId,
     /// Monotonic counter for the next `HandleId` allocation.
     next_handle_id: u32,
+    next_task_id: u64,
 }
 
 impl Default for VM {
@@ -151,6 +155,8 @@ impl Default for VM {
 impl VM {
     #[must_use]
     pub fn new() -> Self {
+        let mut task_registry = HashMap::new();
+        task_registry.insert(TaskId::root(), Task::new(TaskId::root(), None));
         Self {
             stack: Vec::new(),
             frames: Vec::new(),
@@ -158,9 +164,59 @@ impl VM {
             heap: Heap::new(),
             handles: HashMap::new(),
             next_handle_id: 0,
+            next_task_id: 1,
             running: false,
             snapshot: None,
+            task_registry,
+            current_task_id: TaskId::root(),
         }
+    }
+    // -- Task management --
+
+    /// Get a reference to the current active task.
+    ///
+    /// # Panics
+    ///
+    /// Panics if  does not exist in the registry. This
+    /// indicates an internal state corruption and should never occur in
+    /// normal operation.
+    #[must_use]
+    pub fn current_task(&self) -> &Task {
+        self.task_registry
+            .get(&self.current_task_id)
+            .expect("current task must exist in registry")
+    }
+
+    /// Get a mutable reference to the current active task.
+    ///
+    /// # Panics
+    ///
+    /// Panics if  does not exist in the registry. This
+    /// indicates an internal state corruption and should never occur in
+    /// normal operation.
+    pub fn current_task_mut(&mut self) -> &mut Task {
+        self.task_registry
+            .get_mut(&self.current_task_id)
+            .expect("current task must exist in registry")
+    }
+
+    /// Create a  view over the task registry.
+    #[must_use]
+    pub fn task_tree(&self) -> crate::task::TaskTree<'_> {
+        crate::task::TaskTree::new(&self.task_registry)
+    }
+
+    /// Allocate the next .
+    pub fn next_task_id(&mut self) -> TaskId {
+        let id = TaskId(self.next_task_id);
+        self.next_task_id = self.next_task_id.wrapping_add(1);
+        id
+    }
+
+    /// Number of tasks in the registry.
+    #[must_use]
+    pub fn task_count(&self) -> usize {
+        self.task_registry.len()
     }
 
     /// Allocate a string on the heap, triggering GC when
@@ -971,6 +1027,7 @@ mod tests {
     use super::*;
     use crate::function::Function;
     use crate::opcode::OpCode;
+    use crate::task::{TaskId, TaskStatus};
     use crate::value::Value;
 
     fn make_vm(code: Vec<OpCode>) -> VM {
@@ -2080,5 +2137,74 @@ mod tests {
 
         // TimerSleep is a no-op: both pushes should execute
         assert_eq!(vm.stack, &[Value::Int(1), Value::Int(2)]);
+    }
+    // -- Task integration tests --
+
+    #[test]
+    fn task_init_creates_root_task() {
+        let vm = VM::new();
+        // Root task is created on VM init
+        assert_eq!(vm.task_count(), 1);
+        let task = vm.current_task();
+        assert!(task.is_root());
+        assert_eq!(task.id, TaskId::root());
+        assert_eq!(task.status, TaskStatus::Running);
+        assert!(task.children.is_empty());
+        assert!(task.stack.is_empty());
+    }
+
+    #[test]
+    fn task_registry_is_not_empty_after_init() {
+        let vm = VM::new();
+        assert!(!vm.task_registry.is_empty());
+        assert_eq!(vm.task_registry.len(), 1);
+    }
+
+    #[test]
+    fn next_task_id_allocates_monotonically() {
+        let mut vm = VM::new();
+        // first allocation after root (root id=0, next starts at 1)
+        let id1 = vm.next_task_id();
+        assert_eq!(id1, TaskId(1));
+        let id2 = vm.next_task_id();
+        assert_eq!(id2, TaskId(2));
+        let id3 = vm.next_task_id();
+        assert_eq!(id3, TaskId(3));
+    }
+
+    #[test]
+    fn task_id_wrapping_is_safe() {
+        let mut vm = VM::new();
+        vm.next_task_id = u64::MAX;
+        let id = vm.next_task_id();
+        assert_eq!(id, TaskId(u64::MAX));
+        assert_eq!(vm.next_task_id, 0); // wrapping_add
+    }
+
+    #[test]
+    fn task_tree_view_from_vm() {
+        let vm = VM::new();
+        let tree = vm.task_tree();
+        let root = tree.root().unwrap();
+        assert_eq!(root.id, TaskId::root());
+        assert!(root.is_root());
+    }
+
+    #[test]
+    fn current_task_returns_root_after_init() {
+        let vm = VM::new();
+        let task = vm.current_task();
+        assert_eq!(task.id, TaskId::root());
+        assert!(task.parent.is_none());
+    }
+
+    #[test]
+    fn current_task_mut_allows_mutation() {
+        let mut vm = VM::new();
+        {
+            let task = vm.current_task_mut();
+            task.children.push(TaskId(1));
+        }
+        assert_eq!(vm.current_task().children.len(), 1);
     }
 }
