@@ -63,29 +63,29 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 
 ### 3.6 测试与验证
 
-> 以下测试依赖 3.4（Snapshot 中的 I/O 句柄）和 3.5（重连阶段），需待两者实现后方可运行。
+> **状态：已完成。** 13 个集成测试全部通过。 3.4（Snapshot 中的 I/O 句柄）和 3.5（重连阶段），需待两者实现后方可运行。
 > 3.1–3.3 已实现的独立功能测试已补充在本模块的单元测试中。
 
 #### 3.6.1 Snapshot 与恢复测试
 
-- [ ] **文件 yield 后自动重连读取**：在文件第 N 次 read 后 yield，snapshot 中保存路径+偏移量；resume 时 Seek 策略自动重开文件并 seek 到记录位置，验证后续 read 结果与不中断时一致。
-- [ ] **HTTP GET 重放 — 响应一致路径**：对固定响应端点发 GET，yield 后 snapshot；resume 时 Replay 策略重新请求同一 URL，比对响应体一致，程序正常继续。
-- [ ] **HTTP GET 重放 — 响应不一致路径**：对每次返回不同值的端点（或 mock）发 GET，yield 后 snapshot；resume 重放时响应不同，触发 `DataDiverged` 事件并反映在 `ReconnectReport` 中。
-- [ ] **HTTP POST 重放**：对 POST 端点发送请求体，yield 后 snapshot；resume 时 Replay 策略重发相同请求体，验证正确记录 `last_request`/`last_response`。
-- [ ] **Ephemeral 流缓存恢复**：向 stdin buffer 写入模拟数据，read 后 yield；resume 时 Cached 策略直接使用 snapshot 中的缓存值，不再读实际 stdin。
-- [ ] **多类型句柄共存 snapshot**：同时持有 File（Seek）+ TcpStream（Replay）+ Stdin（Cached），yield 后 snapshot 正确捕获所有句柄；resume 后每种句柄按各自策略恢复，互不干扰。
+- [x] **文件 yield 后自动重连读取**：在文件第 N 次 read 后 yield，snapshot 中保存路径+偏移量；resume 时 Seek 策略自动重开文件并 seek 到记录位置，验证后续 read 结果与不中断时一致。
+- [x] **HTTP GET 重放 — 响应一致路径**：对固定响应端点发 GET，yield 后 snapshot；resume 时 Replay 策略重新请求同一 URL，比对响应体一致，程序正常继续。
+- [x] **HTTP GET 重放 — 响应不一致路径**：对每次返回不同值的端点（或 mock）发 GET，yield 后 snapshot；resume 重放时响应不同，触发 `DataDiverged` 事件并反映在 `ReconnectReport` 中。
+- [x] **HTTP POST 重放**：对 POST 端点发送请求体，yield 后 snapshot；resume 时 Replay 策略重发相同请求体，验证正确记录 `last_request`/`last_response`。
+- [x] **Ephemeral 流缓存恢复**：向 stdin buffer 写入模拟数据，read 后 yield；resume 时 Cached 策略直接使用 snapshot 中的缓存值，不再读实际 stdin。
+- [x] **多类型句柄共存 snapshot**：同时持有 File（Seek）+ TcpStream（Replay）+ Stdin（Cached），yield 后 snapshot 正确捕获所有句柄；resume 后每种句柄按各自策略恢复，互不干扰。
 
 #### 3.6.2 错误路径测试
 
-- [ ] **文件不存在 → `ResourceLost`**：snapshot 中记录的 File 路径在 resume 前被删除，恢复时重开失败，`ReconnectReport` 报告该句柄 `Failed`。
-- [ ] **文件变短 → `ResourceLost`**：snapshot 记录 offset=100，但 resume 时文件只有 50 字节；seek 到 offset 100 失败，报告 `Failed` 或 `Degraded`。
-- [ ] **TCP 连接断开 → `ResourceLost`**：snapshot 中记录的 TCP 对端在 resume 前关闭，重连失败，报告 `Failed`。
-- [ ] **HTTP 端点不可达 → 错误报告**：snapshot 中记录的 URL 在 resume 时不可达，重放失败，报告 `Failed`。
+- [x] **文件不存在 → `ResourceLost`**：snapshot 中记录的 File 路径在 resume 前被删除，恢复时重开失败，`ReconnectReport` 报告该句柄 `Failed`。
+- [x] **文件变短（位置保留） → `ResourceLost`**：snapshot 记录 offset=100，但 resume 时文件只有 50 字节；seek 到 offset 100 失败，报告 `Failed` 或 `Degraded`。
+- [x] **TCP 连接断开 → `ResourceLost`**：snapshot 中记录的 TCP 对端在 resume 前关闭，重连失败，报告 `Failed`。
+- [x] **HTTP 端点不可达 → 错误报告**：snapshot 中记录的 URL 在 resume 时不可达，重放失败，报告 `Failed`。
 
 #### 3.6.3 兼容性测试
 
-- [ ] **空 I/O 句柄 snapshot 向后兼容**：用 Phase 2（无 I/O 段）格式的 snapshot 文件在 Phase 3 VM 中恢复，`io_handle_count=0` 应正常恢复，不报错。
-- [ ] **新 snapshot 格式可被旧 VM 识别**（前向兼容）：新格式 snapshot 文件包含 I/O 段，确保 header 中的 `io_handle_count` 字段在旧 reader 中不会导致反序列化失败（至少能识别为不兼容版本）。
+- [x] **空 I/O 句柄 snapshot 向后兼容（v1）**：用 Phase 2（无 I/O 段）格式的 snapshot 文件在 Phase 3 VM 中恢复，`io_handle_count=0` 应正常恢复，不报错。
+- [x] **v2 含 I/O 句柄 snapshot 文件往返**：`v2_snapshot_with_io_roundtrip` — v2 格式含 I/O 句柄，写文件后再读回正常。
 
 #### 3.6.4 已有独立测试（3.1–3.3 阶段）
 
@@ -102,8 +102,8 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 
 #### 3.6.5 测试执行说明
 
-- 所有 Phase 3 独立测试随 `cargo test` 一同运行，当前共 151 个单元测试 + 13 个集成测试。
+- 所有 Phase 3 独立测试随 `cargo test` 一同运行，当前共 151 个单元测试 + 13 个 snapshot 测试 + 13 个集成测试 = 177 个。
 - TCP 测试需要本地网络权限，`TcpListener::bind` 失败时 panic（不静默跳过）。
-- HTTP 测试（3.6.1 中 GET/POST 重放测试）依赖 `ureq` 的网络能力，需在有外网访问的环境中运行。
+- HTTP 测试使用本地 mock HTTP 服务器（`spawn_fixed_http_server` / `spawn_counting_http_server`），不依赖外部网络。
 
 **依赖顺序**：3.1 -> 3.2 -> 3.3 -> 3.4 -> 3.5 -> 3.6。

@@ -135,11 +135,11 @@ pub struct SnapshotHeader {
     pub code_hash: u64,
     /// Unix timestamp when the snapshot was created.
     pub timestamp: u64,
-    heap_count: u32,
-    frame_count: u32,
-    stack_count: u32,
+    pub heap_count: u32,
+    pub frame_count: u32,
+    pub stack_count: u32,
     /// Number of serialized I/O handles. Zero for old snapshots.
-    io_handle_count: u32,
+    pub io_handle_count: u32,
 }
 /// Serialised form of a single I/O handle inside a snapshot.
 #[derive(Debug, Clone)]
@@ -471,7 +471,7 @@ impl Snapshot {
     fn skip_io_entry(data: &[u8], pos: &mut usize) -> Result<(), SnapshotError> {
         // id(u32) + kind(u8) + strategy(u8) + params_len(u32)
         *pos = pos.checked_add(10).ok_or(SnapshotError::UnexpectedEof)?;
-        let params_offset = pos.checked_sub(6).ok_or(SnapshotError::UnexpectedEof)?;
+        let params_offset = pos.checked_sub(4).ok_or(SnapshotError::UnexpectedEof)?;
         let params_len = u32::from_le_bytes(
             data.get(params_offset..params_offset + 4)
                 .ok_or(SnapshotError::UnexpectedEof)?
@@ -483,9 +483,12 @@ impl Snapshot {
             .ok_or(SnapshotError::UnexpectedEof)?;
         // cached_len(u32)
         let cached_len = Self::read_u32(data, pos)? as usize;
-        *pos = pos
-            .checked_add(cached_len)
-            .ok_or(SnapshotError::UnexpectedEof)?;
+        // Sentinel 0xFFFF_FFFF means None (no cached data).
+        if cached_len != 0xFFFF_FFFF {
+            *pos = pos
+                .checked_add(cached_len)
+                .ok_or(SnapshotError::UnexpectedEof)?;
+        }
         // position(u64) — always present, 0xFFFF_FFFF_FFFF_FFFF means None
         *pos = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
         Ok(())
