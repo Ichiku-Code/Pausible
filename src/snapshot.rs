@@ -121,9 +121,8 @@ pub struct Snapshot {
     stack_data: Vec<u8>,
     /// Mapping from original Gc index → position in the heap section
     /// (populated during capture; the reverse map pos→Gc is built
+    #[allow(dead_code)]
     /// during restore from the heap section itself).
-    #[allow(dead_code)]
-    #[allow(dead_code)]
     gc_to_pos: HashMap<usize, u32>,
 }
 
@@ -985,6 +984,12 @@ impl Snapshot {
     /// Restore VM state from this snapshot.
     ///
     /// Verifies the code hash against the provided value.
+    ///
+    /// **I/O handles:** This method does **not** restore I/O handles; callers
+    /// must also invoke [`restore_io_handles`] after this to reconnect file,
+    /// socket, and other I/O state.  Skipping that step will leave the VM
+    /// with whatever handles happened to be present before the restore, and
+    /// the restored program may see incorrect I/O results.
     /// On success the VM's heap, frames, and stack are replaced with
     /// the reconstructed state.
     ///

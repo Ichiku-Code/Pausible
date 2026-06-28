@@ -32,7 +32,7 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 |---|---|---|
 | `TimerSleep` | 空操作，不 sleep | 3.5（重连阶段需要计时器支持） |
 
-> **还未实现。** 当前 `Yield` 只设置 `running = false`，不触发句柄快照。此逻辑在 3.4 中实现。
+> Yield 时自动触发 snapshot 捕获 — 已由 §3.4 实现。
 
 ### 3.3 三类 I/O 策略
  > **状态：已完成。**
@@ -106,4 +106,9 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 - TCP 测试需要本地网络权限，`TcpListener::bind` 失败时 panic（不静默跳过）。
 - HTTP 测试使用本地 mock HTTP 服务器（`spawn_fixed_http_server` / `spawn_counting_http_server`），不依赖外部网络。
 
+
+**已知设计取舍：**
+
+- **HTTP handle 累积** (§3.2, P2-#4)：每次 `HttpGet`/`HttpPost` 调用通过 `create_handle()` 创建新 `HttpConnection` handle，永不关闭，持续累积在 registry 中。这是有意设计，因为 snapshot-replay 需要保留所有 HTTP 调用记录。Phase 4（资源管理）或 Phase 5（编译器集成）中应设计合理的 handle 生命周期策略（如 TTL、引用计数或显式 close 指令）。
+- **`restore_into` 不恢复 I/O handles** (§3.4, P2-#8)：`Snapshot::restore_into` 只恢复堆、帧和栈，不处理 I/O handles。调用方必须配合 `restore_io_handles` 使用，否则旧 handle 会残留。API 层的隐式耦合留待后续阶段解决。
 **依赖顺序**：3.1 -> 3.2 -> 3.3 -> 3.4 -> 3.5 -> 3.6。

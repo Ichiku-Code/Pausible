@@ -1565,6 +1565,14 @@ mod tests {
 
     #[test]
     fn resume_multiple_cycles() {
+        // 多周期 yield-resume 测试：验证 VM 在交替的 push/yield 周期中
+        // 正确保留堆栈状态。
+        //
+        // 第 2 个周期使用 `vm.running = true` 直接恢复执行而非调用
+        // `vm.resume()`，因为当前 `resume()` 的 API 要求 `running == false`
+        // 且需要 snapshot 参数。这里的状态机（yield 后 running 已为 false）
+        // 与 resume 的时序之间的交互是已知 API 限制，不影响真实 resume
+        // 路径的测试覆盖（已有 `resume_continues_after_yield` 等独立测试）。
         let mut vm = make_vm(vec![
             OpCode::Push(Value::Int(1)),
             OpCode::Yield,
