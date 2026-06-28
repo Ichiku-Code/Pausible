@@ -9,7 +9,7 @@ use crate::heap::{Gc, Heap, ListObj, StringObj};
 use crate::io::{FileMode, HandleId, IoHandle, IoStrategy};
 use crate::opcode::OpCode;
 use crate::snapshot::Snapshot;
-use crate::task::{Task, TaskId};
+use crate::task::{Task, TaskId, TaskStatus};
 use crate::value::{TypeError, Value};
 use std::collections::HashMap;
 use std::net::TcpStream;
@@ -211,6 +211,27 @@ impl VM {
         let id = TaskId(self.next_task_id);
         self.next_task_id = self.next_task_id.wrapping_add(1);
         id
+    }
+
+    /// Save the current VM state (stack, frames, handles) into the current
+    /// task in the registry. Used before switching to a different task.
+    fn save_current_task(&mut self) {
+        if let Some(task) = self.task_registry.get_mut(&self.current_task_id) {
+            task.stack = std::mem::take(&mut self.stack);
+            task.frames = std::mem::take(&mut self.frames);
+            task.io_handles = std::mem::take(&mut self.handles);
+        }
+    }
+
+    /// Restore a task's state (stack, frames, handles) into the VM and set
+    /// it as the current task. Used when switching to a different task.
+    fn restore_task(&mut self, task_id: TaskId) {
+        if let Some(task) = self.task_registry.get_mut(&task_id) {
+            self.stack = std::mem::take(&mut task.stack);
+            self.frames = std::mem::take(&mut task.frames);
+            self.handles = std::mem::take(&mut task.io_handles);
+        }
+        self.current_task_id = task_id;
     }
 
     /// Number of tasks in the registry.
@@ -422,7 +443,7 @@ impl VM {
     }
 
     /// Execute a single instruction.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
     pub fn step(&mut self) -> Result<(), VmError> {
         let frame_idx = self
             .frames
@@ -651,6 +672,86 @@ impl VM {
             // -- I/O: timer (placeholder) --
             OpCode::TimerSleep { ms: _ } => {
                 // Placeholder: sleep is a no-op in this phase
+            }
+            OpCode::Spawn(func_id) => {
+                // Validate func_id exists.
+                self.functions
+                    .get(func_id)
+                    .ok_or(VmError::InvalidFunction(func_id))?;
+
+                let child_id = self.next_task_id();
+                let parent_id = self.current_task_id;
+
+                // Initialize child with a call frame for the target function.
+                let func = &self.functions[func_id];
+                let locals = vec![Value::Null; func.num_locals];
+                let mut child = Task::new(child_id, Some(parent_id));
+                child.frames.push(CallFrame::new(func_id, locals));
+
+                // Register child task.
+                self.task_registry.insert(child_id, child);
+
+                // Link child to parent's children list.
+                self.task_registry
+                    .get_mut(&parent_id)
+                    .expect("parent task must exist")
+                    .children
+                    .push(child_id);
+
+                // Child TaskId is stored in the task tree; no need to push
+                // onto the parent stack (the parent can enumerate children
+                // via the task registry).
+            }
+            OpCode::WaitChildren => {
+                // Persist parent state before running children.
+                let parent_id = self.current_task_id;
+                self.save_current_task();
+
+                // Clone children list to avoid borrow conflicts during iteration.
+                let children: Vec<TaskId> = self
+                    .task_registry
+                    .get(&parent_id)
+                    .map(|t| t.children.clone())
+                    .unwrap_or_default();
+
+                let mut return_values = Vec::new();
+
+                for child_id in children {
+                    // Skip children that already completed (idempotent).
+                    if self
+                        .task_registry
+                        .get(&child_id)
+                        .is_some_and(|t| t.status == TaskStatus::Completed)
+                    {
+                        let ret = self
+                            .task_registry
+                            .get_mut(&child_id)
+                            .and_then(|t| t.stack.pop())
+                            .unwrap_or(Value::Null);
+                        return_values.push(ret);
+                        continue;
+                    }
+
+                    // Load child state into VM and execute.
+                    self.restore_task(child_id);
+                    self.running = true;
+                    self.run()?;
+
+                    // Collect child return value from its stack top.
+                    let ret = self.stack.pop().unwrap_or(Value::Null);
+                    return_values.push(ret);
+
+                    // Mark child as completed.
+                    if let Some(child) = self.task_registry.get_mut(&child_id) {
+                        child.status = TaskStatus::Completed;
+                    }
+                }
+
+                // Restore parent state and push collected return values.
+                self.restore_task(parent_id);
+                for val in return_values {
+                    self.stack.push(val);
+                }
             }
         }
 
@@ -2206,5 +2307,198 @@ mod tests {
             task.children.push(TaskId(1));
         }
         assert_eq!(vm.current_task().children.len(), 1);
+    }
+
+    // -- Phase 4.2: Spawn / WaitChildren tests --
+
+    #[test]
+    fn spawn_single_child_and_wait_for_return_value() {
+        // Main spawns a child that pushes 42 and returns.
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),     // spawn child function (id=1)
+                OpCode::WaitChildren, // wait for child, collect return value
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        assert_eq!(vm.stack, vec![Value::Int(42)]);
+        assert_eq!(vm.task_count(), 2); // root + child
+        assert!(vm.task_registry.contains_key(&TaskId(1)));
+    }
+
+    #[test]
+    fn spawn_three_children_and_wait_for_all_return_values() {
+        // Main spawns 3 children, each returning a different value.
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),
+                OpCode::Spawn(2),
+                OpCode::Spawn(3),
+                OpCode::WaitChildren,
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child_a = Function::new(
+            "a",
+            0,
+            vec![OpCode::Push(Value::Int(10)), OpCode::Return],
+            0,
+        );
+        let child_b = Function::new(
+            "b",
+            0,
+            vec![OpCode::Push(Value::Int(20)), OpCode::Return],
+            0,
+        );
+        let child_c = Function::new(
+            "c",
+            0,
+            vec![OpCode::Push(Value::Int(30)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child_a);
+        vm.add_function(child_b);
+        vm.add_function(child_c);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        assert_eq!(
+            vm.stack,
+            vec![Value::Int(10), Value::Int(20), Value::Int(30),]
+        );
+        assert_eq!(vm.task_count(), 4); // root + 3 children
+    }
+
+    #[test]
+    fn spawn_invalid_func_id_returns_error() {
+        let code = vec![
+            OpCode::Spawn(99), // invalid func_id
+            OpCode::WaitChildren,
+            OpCode::Halt,
+        ];
+        let err = run_code(code).unwrap_err();
+        assert_eq!(err, VmError::InvalidFunction(99));
+    }
+
+    #[test]
+    fn wait_children_with_no_children_is_noop() {
+        let code = vec![
+            OpCode::Push(Value::Int(7)),
+            OpCode::WaitChildren, // no children → no-op
+            OpCode::Halt,
+        ];
+        let vm = run_code(code).unwrap();
+        assert_eq!(vm.stack, vec![Value::Int(7)]);
+    }
+
+    #[test]
+    fn nested_spawn_parent_child_grandchild() {
+        // main spawns parent_child, which spawns grandchild, which returns 99.
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),     // spawn parent_child
+                OpCode::WaitChildren, // collect parent_child's return value
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let parent_child = Function::new(
+            "parent_child",
+            0,
+            vec![
+                OpCode::Spawn(2),     // spawn grandchild
+                OpCode::WaitChildren, // collect grandchild's return value
+                OpCode::Return,       // push grandchild's result as own return
+            ],
+            0,
+        );
+        let grandchild = Function::new(
+            "grandchild",
+            0,
+            vec![OpCode::Push(Value::Int(99)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(parent_child);
+        vm.add_function(grandchild);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        assert_eq!(vm.stack, vec![Value::Int(99)]);
+        assert_eq!(vm.task_count(), 3); // root + parent_child + grandchild
+    }
+
+    #[test]
+    fn spawn_then_wait_leaves_children_completed() {
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![OpCode::Spawn(1), OpCode::WaitChildren, OpCode::Halt],
+            0,
+        );
+        let child = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(1)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        let child_task = vm.task_registry.get(&TaskId(1)).unwrap();
+        assert_eq!(child_task.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn spawn_multiple_tasks_increases_task_count() {
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),
+                OpCode::Spawn(2),
+                OpCode::WaitChildren,
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child_a = Function::new("a", 0, vec![OpCode::Push(Value::Int(1)), OpCode::Return], 0);
+        let child_b = Function::new("b", 0, vec![OpCode::Push(Value::Int(2)), OpCode::Return], 0);
+        vm.add_function(main);
+        vm.add_function(child_a);
+        vm.add_function(child_b);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        assert_eq!(vm.task_count(), 3); // root + 2 children
+        assert!(vm.task_registry.contains_key(&TaskId(1)));
+        assert!(vm.task_registry.contains_key(&TaskId(2)));
     }
 }

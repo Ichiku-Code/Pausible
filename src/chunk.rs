@@ -133,6 +133,8 @@ mod tag {
     pub const STDOUT_WRITE: u8 = 0x27;
     pub const STDERR_WRITE: u8 = 0x28;
     pub const TIMER_SLEEP: u8 = 0x29;
+    pub const SPAWN: u8 = 0x2A;
+    pub const WAIT_CHILDREN: u8 = 0x2B;
 }
 
 /// Value type tags.
@@ -319,6 +321,11 @@ fn write_opcode(buf: &mut Vec<u8>, op: &OpCode, heap: &Heap) {
             buf.push(tag::TIMER_SLEEP);
             write_value(buf, ms, heap);
         }
+        OpCode::Spawn(func_id) => {
+            buf.push(tag::SPAWN);
+            write_u32(buf, *func_id as u32);
+        }
+        OpCode::WaitChildren => buf.push(tag::WAIT_CHILDREN),
     }
 }
 
@@ -497,6 +504,11 @@ fn read_opcode(data: &[u8], pos: &mut usize, heap: &mut Heap) -> Result<OpCode, 
             let ms = read_value(data, pos, heap)?;
             Ok(OpCode::TimerSleep { ms })
         }
+        tag::SPAWN => {
+            let func_id = read_u32(data, pos)? as usize;
+            Ok(OpCode::Spawn(func_id))
+        }
+        tag::WAIT_CHILDREN => Ok(OpCode::WaitChildren),
         _ => Err(SerError::UnknownOpcode(*tag)),
     }
 }

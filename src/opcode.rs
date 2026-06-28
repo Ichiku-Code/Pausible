@@ -79,6 +79,8 @@ pub enum OpCode {
         offset: Value,
     },
     /// Close file handle, push success bool.
+    Spawn(usize),
+    WaitChildren,
     FileClose(HandleId),
 
     // -- I/O: TCP --
@@ -138,6 +140,8 @@ impl OpCode {
             Self::Load(_) => "load",
             Self::Store(_) => "store",
             Self::Call(_) => "call",
+            Self::Spawn(_) => "spawn",
+            Self::WaitChildren => "wait_children",
             Self::Return => "ret",
             Self::Halt => "halt",
             Self::Yield => "yield",
@@ -170,6 +174,8 @@ impl fmt::Display for OpCode {
             Self::Load(idx) => write!(f, "load {idx}"),
             Self::Store(idx) => write!(f, "store {idx}"),
             Self::Call(idx) => write!(f, "call {idx}"),
+            Self::Spawn(idx) => write!(f, "spawn {idx}"),
+            Self::WaitChildren => write!(f, "wait_children"),
             Self::FileOpen { path, mode } => write!(f, "file_open {path} {mode}"),
             Self::FileRead(h) => write!(f, "file_read {h}"),
             Self::FileWrite(h) => write!(f, "file_write {h}"),
@@ -220,6 +226,8 @@ mod tests {
         assert_eq!(OpCode::Load(0).mnemonic(), "load");
         assert_eq!(OpCode::Store(0).mnemonic(), "store");
         assert_eq!(OpCode::Call(0).mnemonic(), "call");
+        assert_eq!(OpCode::Spawn(0).mnemonic(), "spawn");
+        assert_eq!(OpCode::WaitChildren.mnemonic(), "wait_children");
         assert_eq!(OpCode::Return.mnemonic(), "ret");
         assert_eq!(OpCode::Halt.mnemonic(), "halt");
         assert_eq!(OpCode::Yield.mnemonic(), "yield");
@@ -276,6 +284,7 @@ mod tests {
         assert_eq!(format!("{}", OpCode::Load(2)), "load 2");
         assert_eq!(format!("{}", OpCode::Store(3)), "store 3");
         assert_eq!(format!("{}", OpCode::Call(7)), "call 7");
+        assert_eq!(format!("{}", OpCode::Spawn(7)), "spawn 7");
         assert_eq!(
             format!(
                 "{}",
@@ -380,6 +389,8 @@ mod tests {
             OpCode::Store(0),
             // -- functions --
             OpCode::Call(0),
+            OpCode::Spawn(0),
+            OpCode::WaitChildren,
             OpCode::Return,
             OpCode::Halt,
             OpCode::Yield,
@@ -414,7 +425,7 @@ mod tests {
             OpCode::TimerSleep { ms: Value::Null },
         ];
         // 27 existing + 15 new = 42
-        assert_eq!(variants.len(), 42);
+        assert_eq!(variants.len(), 44);
     }
 
     #[test]
