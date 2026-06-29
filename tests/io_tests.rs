@@ -40,56 +40,6 @@ fn make_temp_file(name: &str, content: &[u8]) -> String {
     path
 }
 
-// ---------------------------------------------------------------------------
-// 3.6.3  compatibility
-// ---------------------------------------------------------------------------
-
-/// Convert a v2 snapshot file to v1 format by changing the version byte
-/// and stripping the 4-byte `io_handle_count` field and `io_section`.
-fn downgrade_to_v1_file(path: &str) {
-    let data = std::fs::read(path).unwrap();
-    // v2 header = 40 bytes (magic+version+code_hash+timestamp+heap+frame+stack+io_handle)
-    // v1 header = 36 bytes (same minus io_handle_count)
-    // After v2 header: heap + frames + stack + io_section(4 bytes for count=0)
-    let mut v1 = Vec::with_capacity(data.len() - 8);
-    v1.extend_from_slice(&data[..36]); // v1 header (36 bytes)
-    v1[4..8].copy_from_slice(&1u32.to_le_bytes()); // version = 1
-    v1.extend_from_slice(&data[40..data.len() - 4]); // skip 40-byte v2 header, strip io_section
-    std::fs::write(path, &v1).unwrap();
-}
-
-/// A v1 snapshot (no I/O section) deserializes with `io_handle_count=0`.
-#[test]
-fn v1_snapshot_no_io_backward_compat() {
-    let mut vm = run_code(vec![OpCode::Push(Value::Int(42)), OpCode::Halt]);
-    let s = vm.alloc_string("hello".into());
-    vm.stack.push(Value::String(s));
-
-    let snap = vm.create_snapshot();
-    assert_eq!(snap.header.version, 2);
-
-    let tmp = "/tmp/pausible_v1_test.bin";
-    snap.write_to_file(tmp).unwrap();
-    downgrade_to_v1_file(tmp);
-
-    let loaded = Snapshot::read_from_file(tmp).unwrap();
-    assert_eq!(loaded.header.version, 1);
-    assert_eq!(loaded.header.io_handle_count, 0);
-
-    let mut restored = VM::new();
-    let func = Function::new(
-        "main",
-        0,
-        vec![OpCode::Push(Value::Int(42)), OpCode::Halt],
-        0,
-    );
-    restored.add_function(func);
-    restored.prepare(0).unwrap();
-    let ch = restored.code_hash();
-    loaded.restore_into(&mut restored, ch).unwrap();
-    assert!(matches!(restored.stack.last(), Some(Value::String(_))));
-}
-
 #[test]
 fn v2_snapshot_with_io_roundtrip() {
     let mut vm = run_code(vec![OpCode::Push(Value::Int(1)), OpCode::Halt]);

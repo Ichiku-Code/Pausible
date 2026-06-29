@@ -378,7 +378,7 @@ impl Snapshot {
         let stack_data = data[stack_start..pos].to_vec();
 
         // Read I/O section: count(u32) then io entries.
-        let io_section = if io_handle_count > 0 {
+        let io_section = if version >= 2 {
             let io_start = pos;
             let _io_count_data = Self::read_u32(data, &mut pos)?;
             for _ in 0..io_handle_count {

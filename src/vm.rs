@@ -222,7 +222,7 @@ impl VM {
 
     /// Save the current VM state (stack, frames, handles) into the current
     /// task in the registry. Used before switching to a different task.
-    fn save_current_task(&mut self) {
+    pub fn save_current_task(&mut self) {
         if let Some(task) = self.task_registry.get_mut(&self.current_task_id) {
             task.stack = std::mem::take(&mut self.stack);
             task.frames = std::mem::take(&mut self.frames);
@@ -232,7 +232,7 @@ impl VM {
 
     /// Restore a task's state (stack, frames, handles) into the VM and set
     /// it as the current task. Used when switching to a different task.
-    fn restore_task(&mut self, task_id: TaskId) {
+    pub fn restore_task(&mut self, task_id: TaskId) {
         if let Some(task) = self.task_registry.get_mut(&task_id) {
             self.stack = std::mem::take(&mut task.stack);
             self.frames = std::mem::take(&mut task.frames);
@@ -344,6 +344,31 @@ impl VM {
     }
 
     /// Run a full mark-sweep GC cycle.
+    /// Scan roots across ALL tasks in the registry (not just the active
+    /// VM stack/frames). Used during snapshot capture when task state
+    /// has been saved into the registry.
+    pub fn mark_all_task_roots(&mut self) {
+        // Mark from the active VM stack and frames.
+        for val in &self.stack {
+            self.heap.mark_value(val);
+        }
+        for frame in &self.frames {
+            for val in &frame.locals {
+                self.heap.mark_value(val);
+            }
+        }
+        // Mark from all tasks in the registry.
+        for task in self.task_registry.values() {
+            for val in &task.stack {
+                self.heap.mark_value(val);
+            }
+            for frame in &task.frames {
+                for val in &frame.locals {
+                    self.heap.mark_value(val);
+                }
+            }
+        }
+    }
     ///
     /// 1. Reset marks, then mark every reachable object from roots.
     /// 2. Sweep: unmarked slots are added to the free list for reuse.
@@ -589,6 +614,14 @@ impl VM {
                     return Err(VmError::UncompletedChildren(uncompleted));
                 }
 
+                // Set current task status to Yielded so Snapshot::capture
+                // includes it in the task tree.  At this point frame.ip has
+                // already been advanced past the Yield instruction, so it
+                // points to the correct resume PC.
+                if let Some(task) = self.task_registry.get_mut(&self.current_task_id) {
+                    let pc = self.frames.last().map_or(0, |f| f.ip);
+                    task.status = TaskStatus::Yielded(pc);
+                }
                 let ch = self.code_hash();
                 self.snapshot = Some(Snapshot::capture(self, ch));
                 self.running = false;
@@ -2605,6 +2638,49 @@ mod tests {
         assert_eq!(child_task.status, TaskStatus::Completed);
     }
 
+    #[test]
+    fn yield_resume_preserves_task_tree() {
+        let mut vm = VM::new();
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),
+                OpCode::WaitChildren,
+                OpCode::Yield,
+                OpCode::Push(Value::Int(99)),
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        let snap = vm.snapshot.clone().expect("snapshot should exist");
+
+        let result = vm.resume(&snap);
+        assert!(result.is_ok(), "resume should succeed: {result:?}");
+
+        assert_eq!(vm.stack, &[Value::Int(42), Value::Int(99)]);
+        assert!(!vm.running);
+
+        let root = vm
+            .task_registry
+            .get(&TaskId::root())
+            .expect("root must exist");
+        assert_eq!(root.children.len(), 1);
+
+        let child_task = vm.task_registry.get(&TaskId(1)).expect("child must exist");
+        assert_eq!(child_task.status, TaskStatus::Completed);
+    }
     #[test]
     fn uncompleted_children_error_display() {
         let err = VmError::UncompletedChildren(vec![TaskId(1), TaskId(3)]);

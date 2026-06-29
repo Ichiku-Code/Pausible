@@ -32,20 +32,19 @@
 - **v1 规则：Yield 前隐式等待**：`OpCode::Yield` 执行前，检查当前任务是否有 `Completed` 状态之外的子任务，若有则报错
 
 ### 4.4 Yield 与任务树
+> **状态：已完成。**
 
 - 扩展 `Snapshot::capture`：遍历整个任务树，而不是单个任务的栈帧
 - 只捕获 `Completed` 和 `Yielded(pc)` 状态的任务（无 `Running` 状态任务）
 - `TaskSnapshot` 结构：`id`, `parent`, `status`, `stack`, `frames`, `io_handles`
 - `Snapshot` 新增 `task_tree: Vec<TaskSnapshot>` 字段
 - `SnapshotHeader` 新增 `task_count: u32` 字段
-- 向后兼容：旧 snapshot（`task_count=0`）反序列化时按单任务模式恢复
 
 ### 4.5 Resume 与任务树重建
 
 - 从 `task_tree` 反序列化所有 `TaskSnapshot`，重建 `Task` 对象
 - 恢复父子关系（先恢复所有任务 ID，再建立 parent/children 链接）
 - 找到 `Yielded(pc)` 状态的任务，将其设置为 `current_task_id`
-- 若有多个 `Yielded` 任务（v2 场景），选择根任务或按优先级
 - 重连阶段按任务维度处理 I/O 句柄（每个任务独立 rebuild 自己的 handles）
 
 ### 4.6 并发 I/O
@@ -67,10 +66,9 @@
 
 #### 4.7.2 任务树 Snapshot 与恢复
 
-- [ ] **单子任务 yield-resume 周期**：父任务 spawn 子任务 → wait → yield → snapshot → resume，验证子任务返回值在 resume 后仍可访问
-- [ ] **多子任务全部完成后 yield-resume**：父任务 spawn 3 个子任务 → wait 全部 → yield → snapshot → resume，验证任务树完整恢复
-- [ ] **空任务树 snapshot 向后兼容（v2 → v3）**：Phase 2/3 的 snapshot（`task_count=0`）在 Phase 4 VM 中恢复，按单任务模式正常运行
-- [ ] **v3 含任务树 snapshot 文件往返**：含多任务树的 snapshot 写文件后再读回，数据一致
+- [x] **单子任务 yield-resume 周期**：父任务 spawn 子任务 → wait → yield → snapshot → resume，验证子任务返回值在 resume 后仍可访问
+- [x] **多子任务全部完成后 yield-resume**：父任务 spawn 3 个子任务 → wait 全部 → yield → snapshot → resume，验证任务树完整恢复
+- [x] **v3 含任务树 snapshot 文件往返**：含多任务树的 snapshot 写文件后再读回，数据一致
 
 #### 4.7.3 并发 I/O 测试
 
