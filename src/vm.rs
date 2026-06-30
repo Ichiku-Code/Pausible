@@ -74,6 +74,8 @@ pub enum VmError {
     /// Attempted to Yield while the current task still has
     /// children that are not yet Completed (v1 rule).
     UncompletedChildren(Vec<TaskId>),
+    /// Spawn would exceed the maximum task tree depth.
+    TaskTreeTooDeep(usize),
 }
 
 impl fmt::Display for VmError {
@@ -91,6 +93,9 @@ impl fmt::Display for VmError {
             Self::UncompletedChildren(ids) => {
                 let list: Vec<String> = ids.iter().map(|id| format!("{id}")).collect();
                 write!(f, "cannot yield: uncompleted children: {}", list.join(", "))
+            }
+            Self::TaskTreeTooDeep(depth) => {
+                write!(f, "task tree depth {depth} exceeds maximum allowed depth")
             }
         }
     }
@@ -245,6 +250,27 @@ impl VM {
     #[must_use]
     pub fn task_count(&self) -> usize {
         self.task_registry.len()
+    }
+
+    /// Compute the depth of the current task in the task tree.
+    ///
+    /// Depth 1 means the current task is the root (no parent).
+    /// Each step up the parent chain adds 1.
+    #[must_use]
+    pub fn compute_task_depth(&self) -> usize {
+        let mut depth = 0;
+        let mut current = self.current_task_id;
+        loop {
+            depth += 1;
+            match self.task_registry.get(&current) {
+                Some(task) => match task.parent {
+                    Some(pid) => current = pid,
+                    None => break, // reached root
+                },
+                None => break,
+            }
+        }
+        depth
     }
 
     /// Allocate a string on the heap, triggering GC when
@@ -751,6 +777,13 @@ impl VM {
                     .get(func_id)
                     .ok_or(VmError::InvalidFunction(func_id))?;
 
+                // Check task tree depth limit to prevent unbounded
+                // recursion via nested spawns.
+                let depth = self.compute_task_depth();
+                if depth >= 256 {
+                    return Err(VmError::TaskTreeTooDeep(depth));
+                }
+
                 let child_id = self.next_task_id();
                 let parent_id = self.current_task_id;
 
@@ -807,7 +840,13 @@ impl VM {
                     // Load child state into VM and execute.
                     self.restore_task(child_id);
                     self.running = true;
-                    self.run()?;
+                    if let Err(e) = self.run() {
+                        // Restore parent state before propagating the
+                        // error so the parent can continue or handle it.
+                        self.restore_task(parent_id);
+                        self.running = true;
+                        return Err(e);
+                    }
 
                     // Collect child return value from its stack top.
                     let ret = self.stack.pop().unwrap_or(Value::Null);
@@ -1207,7 +1246,7 @@ mod tests {
     use super::*;
     use crate::function::Function;
     use crate::opcode::OpCode;
-    use crate::task::{TaskId, TaskStatus};
+    use crate::task::{Task, TaskId, TaskStatus};
     use crate::value::Value;
 
     fn make_vm(code: Vec<OpCode>) -> VM {
@@ -2701,5 +2740,143 @@ mod tests {
         assert!(msg.contains("cannot yield"));
         assert!(msg.contains("Task(1)"));
         assert!(msg.contains("Task(3)"));
+    }
+
+    // -- 4.7.4 error path tests --
+
+    /// Verify that when a child task encounters a runtime error
+    /// (division by zero), the error propagates through `WaitChildren`
+    /// and the parent state is restored so the VM is not left in a
+    /// corrupted state.
+    #[test]
+    fn child_error_propagates_through_wait_children() {
+        let main_fn = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::Spawn(1),     // spawn child
+                OpCode::WaitChildren, // run child, should get error
+                OpCode::Halt,
+            ],
+            0,
+        );
+        // Child triggers StackUnderflow by popping from empty stack.
+        let child_fn = Function::new(
+            "child",
+            0,
+            vec![
+                OpCode::Pop, // stack underflow
+                OpCode::Return,
+            ],
+            0,
+        );
+
+        let mut vm = VM::new();
+        vm.add_function(main_fn);
+        vm.add_function(child_fn);
+        vm.prepare(0).unwrap();
+
+        let result = vm.run();
+        assert!(result.is_err(), "expected division by zero error");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VmError::StackUnderflow),
+            "expected StackUnderflow from child Pop, got {err:?}"
+        );
+
+        // Parent state should be restored: stack should be empty
+        // (parent had no pushes before WaitChildren), frames should
+        // have the parent frame, and the VM should be the root task.
+        assert_eq!(
+            vm.stack,
+            vec![],
+            "parent stack should be empty after error propagation"
+        );
+        assert_eq!(vm.frames.len(), 1, "parent frame should be restored");
+        assert_eq!(
+            vm.current_task_id,
+            TaskId::root(),
+            "should be back to root task"
+        );
+
+        // Child should exist but be in a partial state.
+        let child = vm
+            .task_registry
+            .get(&TaskId(1))
+            .expect("child task should exist");
+        assert_ne!(
+            child.status,
+            TaskStatus::Completed,
+            "child should not be marked Completed after error"
+        );
+    }
+
+    /// Verify that `compute_task_depth` returns correct values for
+    /// a manually constructed task chain, and that spawning at the
+    /// depth limit returns .
+    #[test]
+    fn task_tree_depth_computation_and_limit() {
+        let mut vm = VM::new();
+
+        // Root has depth 1.
+        assert_eq!(vm.compute_task_depth(), 1);
+
+        // Build a chain: root -> child(1) -> child(2) -> ... -> child(255)
+        // Total tasks: 256, deepest at depth 256.
+        for i in 1u64..256 {
+            let task = Task::new(TaskId(i), Some(TaskId(i - 1)));
+            vm.task_registry.insert(TaskId(i), task);
+        }
+
+        // Link parent->child references.
+        if let Some(root) = vm.task_registry.get_mut(&TaskId::root()) {
+            root.children.push(TaskId(1));
+        }
+        for i in 1u64..255 {
+            if let Some(task) = vm.task_registry.get_mut(&TaskId(i)) {
+                task.children.push(TaskId(i + 1));
+            }
+        }
+
+        // Set current to the deepest task (depth 256).
+        vm.current_task_id = TaskId(255);
+        assert_eq!(vm.compute_task_depth(), 256);
+
+        // Now try to spawn a child from the deepest task.
+        let child_fn = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(0)), OpCode::Return],
+            0,
+        );
+        let main_fn = Function::new("main", 0, vec![OpCode::Spawn(1), OpCode::Halt], 0);
+        vm.add_function(main_fn);
+        vm.add_function(child_fn);
+        vm.prepare(0).unwrap();
+
+        let result = vm.step();
+        assert!(result.is_err(), "spawn at depth 256 should fail");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, VmError::TaskTreeTooDeep(256)),
+            "expected TaskTreeTooDeep(256), got {err:?}"
+        );
+
+        // At depth 255 (one level above), spawn should succeed.
+        vm.current_task_id = TaskId(254);
+        vm.prepare(0).unwrap();
+        let result = vm.step();
+        assert!(
+            result.is_ok(),
+            "spawn at depth 255 should succeed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn task_tree_too_deep_error_display() {
+        let err = VmError::TaskTreeTooDeep(256);
+        let msg = format!("{err}");
+        assert!(msg.contains("depth"));
+        assert!(msg.contains("256"));
     }
 }
