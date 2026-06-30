@@ -247,6 +247,19 @@ IoHandleSnapshot {
 
 **交付物**：开发者可以写 `.pau` 源文件，编译为字节码，在 VM 上运行。
 
+
+### Phase 5 待实现功能清单
+
+以下功能在 Phase 1–4 中已预留接口或占位实现，具体逻辑推迟至 Phase 5 完成。制定 Phase 5 计划时应将此清单作为输入。
+
+| 功能 | 当前状态 | Phase 5 目标 |
+|---|---|---|
+| `TimerSleep` 指令 | 占位 no-op，`IoHandle::Timer` 变体从未创建 | 创建 `IoHandle::Timer`，记录 `start_instant` 和 `remaining_ms`，resume 时重新计算剩余时间 |
+| `Yield` 的 `ResumeBlock` | 零操作数指令，无 `ok`/`partial`/`error` 分支 | 扩展为携带三个分支地址，支持 `yield resume { ok => ..., partial => ..., error => ... }` 语法 |
+| `ReconnectPolicy` | PHASE3 中预留接口，未经测试 | 与 `yield resume { ... }` 语法一起实现，控制重连失败时的行为 |
+| HTTP handle 生命周期 | 每次调用累积新 handle，永不关闭 | 设计合理的生命周期策略（TTL、引用计数或显式 close 指令） |
+| 子任务协同 yield（v2） | DESIGN §2.4 描述但未实现 | 允许子任务在下一个 yield 点暂停，与父任务一起冻结 |
+
 ### Phase 6：打磨与工具链（持续）
 
 - Snapshot 的跨设备传输（文件 or 网络）

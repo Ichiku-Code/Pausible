@@ -29,7 +29,7 @@
 - 子任务完成时将其栈顶值作为返回值传递给父任务
 - 返回值收集方式：子任务执行完毕后 `push_return_value`，父任务 `WaitChildren` 后从 `child_returns: Vec<Value>` 获取
 - `TaskStatus` 转换：`Running` → `Completed`（子任务执行到函数末尾或 `Return` 指令）
-- **v1 规则：Yield 前隐式等待**：`OpCode::Yield` 执行前，检查当前任务是否有 `Completed` 状态之外的子任务，若有则报错
+- **v1 规则：Yield 前显式检查**：`OpCode::Yield` 执行前，检查当前任务是否有 `Completed` 状态之外的子任务，若有则返回 `VmError::UncompletedChildren`
 
 ### 4.4 Yield 与任务树
 > **状态：已完成。**

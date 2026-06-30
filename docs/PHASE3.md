@@ -55,12 +55,12 @@ Resume 时按类别重建连接（Replay / Seek / Cached），并提供显式的
 ### 3.5 重连阶段
  > **状态：已完成。**
 >
+> **已知例外：`TimerSleep` 仍为占位符（no-op），计时器支持（IoHandle::Timer 创建、剩余时间计算、resume 恢复）推迟至 Phase 5。**
 - `ReconnectReport` 结构：每个句柄一个 `ReconnectStatus`（`Ok` / `Degraded` / `Failed`），含错误信息和状态码
 - `Snapshot::restore_into` 扩展：堆/帧/栈恢复后，进入重连阶段，逐句柄尝试重连
 - `VM::resume` 行为：默认任何非 Optional 句柄重连失败则返回 `ResumeError::Reconnect`
 - 为 `yield resume { ... }` 语法预留 `ReconnectPolicy`（Phase 5 编译器后可用）
-- `OpCode::Yield` 后跟 `ResumeBlock`（`ok` / `partial` / `error` 三个分支地址），当前阶段可预留操作数位置，默认行为为"任一失败则终止"
-
+- `OpCode::Yield` 计划在 Phase 5 中扩展为携带 `ResumeBlock`（`ok` / `partial` / `error` 三个分支地址），当前为零操作数指令，默认行为为"任一失败则终止"
 ### 3.6 测试与验证
 
 > **状态：已完成。** 13 个集成测试全部通过。 3.4（Snapshot 中的 I/O 句柄）和 3.5（重连阶段），需待两者实现后方可运行。

@@ -656,6 +656,13 @@ impl VM {
                 if let Some(task) = self.task_registry.get_mut(&self.current_task_id) {
                     let pc = self.frames.last().map_or(0, |f| f.ip);
                     task.status = TaskStatus::Yielded(pc);
+                    // Clone handles into the task registry before capture
+                    // so that capture's dedup logic skips them from the
+                    // global io_section and serializes them in the task
+                    // section instead. We cannot call save_current_task()
+                    // here because it would take vm.frames/vm.stack, and
+                    // capture needs to read those directly.
+                    task.io_handles.clone_from(&self.handles);
                 }
                 let ch = self.code_hash();
                 self.snapshot = Some(Snapshot::capture(self, ch));
@@ -1841,14 +1848,6 @@ mod tests {
 
     #[test]
     fn resume_multiple_cycles() {
-        // 多周期 yield-resume 测试：验证 VM 在交替的 push/yield 周期中
-        // 正确保留堆栈状态。
-        //
-        // 第 2 个周期使用 `vm.running = true` 直接恢复执行而非调用
-        // `vm.resume()`，因为当前 `resume()` 的 API 要求 `running == false`
-        // 且需要 snapshot 参数。这里的状态机（yield 后 running 已为 false）
-        // 与 resume 的时序之间的交互是已知 API 限制，不影响真实 resume
-        // 路径的测试覆盖（已有 `resume_continues_after_yield` 等独立测试）。
         let mut vm = make_vm(vec![
             OpCode::Push(Value::Int(1)),
             OpCode::Yield,
@@ -1858,19 +1857,19 @@ mod tests {
             OpCode::Halt,
         ]);
 
-        // Cycle 1: push 1, yield
         vm.step().unwrap(); // push 1
         vm.step().unwrap(); // yield
         let snap1 = vm.create_snapshot();
-        vm.resume(&snap1).unwrap(); // push 2, yield, halt
-        // Actually push 2 then yield → running is false
-        assert!(!vm.running);
-        assert!(!vm.stack.is_empty());
+        vm.resume(&snap1).unwrap(); // push 2, yield
 
-        // Cycle 2: manually resume by re-enabling running
-        vm.running = true;
-        vm.step().unwrap(); // push 3
-        vm.step().unwrap(); // halt
+        // Cycle 2: take the snapshot captured by the second Yield,
+        // then resume through the formal API.  Each cycle goes through
+        // the full resume path (restore_snapshot + restore_task_tree
+        // + restore_io_handles + reconnect check + run).
+        assert!(!vm.running);
+        let snap2 = vm.snapshot.take().unwrap();
+        vm.resume(&snap2).unwrap();
+
         assert_eq!(vm.stack, &[Value::Int(1), Value::Int(2), Value::Int(3)]);
     }
 
@@ -2732,6 +2731,65 @@ mod tests {
 
         let child_task = vm.task_registry.get(&TaskId(1)).expect("child must exist");
         assert_eq!(child_task.status, TaskStatus::Completed);
+    }
+    #[test]
+    fn parent_file_handle_persists_after_yield_resume() {
+        // Verifies that when a parent task opens a file before spawning,
+        // the file handle is correctly persisted to task_registry after
+        // yield+resume (P1-#1).
+        let fpath = "/tmp/pausible_test_parent_handle.txt";
+        std::fs::write(fpath, b"data").unwrap();
+
+        let mut vm = VM::new();
+        let path = vm.alloc_string(fpath.into());
+        let mode = vm.alloc_string("r".into());
+        let main = Function::new(
+            "main",
+            0,
+            vec![
+                OpCode::FileOpen {
+                    path: Value::String(path),
+                    mode: Value::String(mode),
+                },
+                OpCode::Spawn(1),
+                OpCode::WaitChildren,
+                OpCode::Yield,
+                OpCode::Halt,
+            ],
+            0,
+        );
+        let child = Function::new(
+            "child",
+            0,
+            vec![OpCode::Push(Value::Int(42)), OpCode::Return],
+            0,
+        );
+        vm.add_function(main);
+        vm.add_function(child);
+        vm.prepare(0).unwrap();
+        vm.run().unwrap();
+
+        let snap = vm.snapshot.clone().expect("snapshot should exist");
+
+        let result = vm.resume(&snap);
+        assert!(result.is_ok(), "resume should succeed: {result:?}");
+
+        // After resume, the parent (root) task must retain its file
+        // handle in the task registry, not just in the global vm.handles.
+        let root = vm
+            .task_registry
+            .get(&TaskId::root())
+            .expect("root must exist");
+        assert!(
+            !root.io_handles.is_empty(),
+            "parent task should own its I/O handles after resume"
+        );
+
+        // Verify the child completed correctly.
+        let child_task = vm.task_registry.get(&TaskId(1)).expect("child must exist");
+        assert_eq!(child_task.status, TaskStatus::Completed);
+
+        let _ = std::fs::remove_file(fpath);
     }
     #[test]
     fn uncompleted_children_error_display() {

@@ -3,7 +3,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::io::{HandleId, IoHandle, IoStrategy};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::heap::{Heap, HeapObject};
@@ -270,10 +270,25 @@ impl Snapshot {
         }
 
         // 4.5. Serialize I/O handles.
+        // Skip handles that already belong to the current task in the
+        // registry — they are captured in the task tree section (step 4.6).
+        // This avoids duplication and keeps handle ownership symmetric:
+        // after resume, each task's handles are restored to its registry
+        // entry rather than only to the global vm.handles.
         let mut io_buf: Vec<u8> = Vec::new();
-        let io_count = vm.handles.len() as u32;
+        let current_task_handle_ids: HashSet<u32> = vm
+            .task_registry
+            .get(&vm.current_task_id)
+            .map(|t| t.io_handles.keys().map(|h| h.0).collect())
+            .unwrap_or_default();
+        let global_handles: Vec<_> = vm
+            .handles
+            .iter()
+            .filter(|(id, _)| !current_task_handle_ids.contains(&id.0))
+            .collect();
+        let io_count = global_handles.len() as u32;
         Self::write_u32(&mut io_buf, io_count);
-        for (&id, handle) in &vm.handles {
+        for (&id, handle) in global_handles {
             Self::serialize_io_handle_snapshot(&mut io_buf, id, handle);
         }
 
@@ -1324,7 +1339,11 @@ impl Snapshot {
 
             // Skip the current task — its state comes from restore_into.
             if task_id == current_id {
-                // Skip stack, frames, I/O sections for the current task.
+                // Skip stack and frames for the current task (restored by
+                // restore_into).  I/O handles are NOT skipped: they were
+                // captured in the task section (see Yield handler) so they
+                // must be deserialized and stored in the task registry to
+                // keep handle ownership symmetric.
                 let scount = Self::read_u32(&self.task_section, &mut tpos)? as usize;
                 for _ in 0..scount {
                     Self::skip_value(&self.task_section, &mut tpos)?;
@@ -1334,13 +1353,30 @@ impl Snapshot {
                     Self::skip_frame_entry(&self.task_section, &mut tpos)?;
                 }
                 let io_count = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                let mut task_io_handles = HashMap::new();
                 for _ in 0..io_count {
-                    Self::skip_io_entry(&self.task_section, &mut tpos)?;
+                    let snap = Self::deserialize_io_handle_snapshot(&self.task_section, &mut tpos)?;
+                    let hid = crate::io::HandleId(snap.id);
+                    let (handle, status) = Self::reconnect_handle(
+                        &snap,
+                        match snap.strategy {
+                            0 => crate::io::IoStrategy::Replay,
+                            1 => crate::io::IoStrategy::Seek,
+                            _ => crate::io::IoStrategy::Cached,
+                        },
+                    );
+                    report.entries.push((hid, status));
+                    task_io_handles.insert(hid, handle);
                 }
-                // Update the current task's children list in the registry.
+                // Update the current task's children list and I/O handles.
+                // Handles are restored to both the task registry (for
+                // future snapshots) and vm.handles (for immediate I/O
+                // operations by the current task).
                 if let Some(task) = vm.task_registry.get_mut(&current_id) {
                     task.children = children;
                     task.status = status;
+                    vm.handles.clone_from(&task_io_handles);
+                    task.io_handles = task_io_handles;
                 }
                 continue;
             }
