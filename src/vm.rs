@@ -453,6 +453,8 @@ impl VM {
     pub fn resume(&mut self, snap: &crate::snapshot::Snapshot) -> Result<(), ResumeError> {
         self.restore_snapshot(snap)
             .map_err(|e| ResumeError::Snapshot(e.to_string()))?;
+        snap.restore_task_tree(self)
+            .map_err(|e| ResumeError::Snapshot(e.to_string()))?;
         let report = snap.restore_io_handles(self);
         if report.has_failures() {
             let failed: Vec<String> = report

@@ -13,7 +13,7 @@ use crate::vm::{CallFrame, VM};
 // -- header constants --
 
 const MAGIC: [u8; 4] = *b"PAUS";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 // Value type tags (mirrors serialize.rs wire format).
 const TAG_INT: u8 = 0x00;
@@ -124,6 +124,10 @@ pub struct Snapshot {
     #[allow(dead_code)]
     /// during restore from the heap section itself).
     gc_to_pos: HashMap<usize, u32>,
+    /// Serialised task tree state.
+    pub task_tree: Vec<TaskSnapshot>,
+    /// Raw bytes of the serialised task section.
+    pub task_section: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +143,8 @@ pub struct SnapshotHeader {
     pub stack_count: u32,
     /// Number of serialized I/O handles. Zero for old snapshots.
     pub io_handle_count: u32,
+    /// Number of serialized tasks.
+    pub task_count: u32,
 }
 /// Serialised form of a single I/O handle inside a snapshot.
 #[derive(Debug, Clone)]
@@ -155,6 +161,25 @@ pub struct IoHandleSnapshot {
     pub cached: Option<Vec<u8>>,
     /// File position for Seekable handles.
     pub position: Option<u64>,
+}
+
+/// Serialised form of a single task inside a snapshot.
+#[derive(Debug, Clone)]
+pub struct TaskSnapshot {
+    pub id: u32,
+    pub parent: Option<u32>,
+    /// 1=Yielded, 2=Completed.
+    pub status_kind: u8,
+    /// Resume PC for Yielded tasks.
+    pub yielded_pc: Option<u32>,
+    pub children: Vec<u32>,
+    /// Serialised stack values (position-reference format).
+    pub stack_data: Vec<u8>,
+    /// Serialised frames.
+    pub frames_data: Vec<u8>,
+    /// Serialised per-task I/O handles.
+    pub io_data: Vec<u8>,
+    pub io_handle_count: u32,
 }
 
 impl Snapshot {
@@ -212,8 +237,8 @@ impl Snapshot {
     /// Panics if a `Gc` handle points to a freed slot — this indicates
     /// a GC bug and should never happen with a healthy VM.
     pub fn capture(vm: &mut VM, code_hash: u64) -> Self {
-        // 1. Mark all reachable objects from roots.
-        vm.mark_roots();
+        // 1. Mark all reachable objects from roots (including task registry).
+        vm.mark_all_task_roots();
 
         // 2. Serialize reachable heap objects, building gc→position map.
         let mut heap_buf: Vec<u8> = Vec::new();
@@ -252,6 +277,19 @@ impl Snapshot {
             Self::serialize_io_handle_snapshot(&mut io_buf, id, handle);
         }
 
+        // 4.6. Serialize task tree (non-Running tasks from registry).
+        let mut task_buf: Vec<u8> = Vec::new();
+        let tasks: Vec<_> = vm
+            .task_registry
+            .values()
+            .filter(|t| !t.status.is_running())
+            .collect();
+        let task_count = u32::try_from(tasks.len()).unwrap_or(0);
+        Self::write_u32(&mut task_buf, task_count);
+        for task in &tasks {
+            Self::serialize_task_snapshot(&mut task_buf, task, &gc_to_pos, &vm.heap);
+        }
+
         // 5. Assemble header.
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -267,6 +305,7 @@ impl Snapshot {
             frame_count: vm.frames.len() as u32,
             stack_count: vm.stack.len() as u32,
             io_handle_count: io_count,
+            task_count,
         };
 
         Snapshot {
@@ -275,6 +314,8 @@ impl Snapshot {
             frames_data: frames_buf,
             stack_data: stack_buf,
             io_section: io_buf,
+            task_tree: Vec::new(),
+            task_section: task_buf,
             gc_to_pos,
         }
     }
@@ -298,12 +339,14 @@ impl Snapshot {
         Self::write_u32(&mut buf, self.header.frame_count);
         Self::write_u32(&mut buf, self.header.stack_count);
         Self::write_u32(&mut buf, self.header.io_handle_count);
+        Self::write_u32(&mut buf, self.header.task_count);
 
         // Sections
         buf.extend_from_slice(&self.heap_data);
         buf.extend_from_slice(&self.frames_data);
         buf.extend_from_slice(&self.stack_data);
         buf.extend_from_slice(&self.io_section);
+        buf.extend_from_slice(&self.task_section);
 
         std::fs::write(path, &buf).map_err(|e| SnapshotError::IoError(e.to_string()))
     }
@@ -354,6 +397,13 @@ impl Snapshot {
             0
         };
 
+        // Backward compat: v1/v2 snapshots have no task_count field.
+        let task_count = if version >= 3 {
+            Self::read_u32(data, &mut pos)?
+        } else {
+            0
+        };
+
         // Read heap section: each object is self-describing.
         let heap_start = pos;
         for _ in 0..heap_count {
@@ -389,6 +439,18 @@ impl Snapshot {
             Vec::new()
         };
 
+        // Read task section: count(u32) then task entries.
+        let task_section = if task_count > 0 {
+            let task_start = pos;
+            let _task_count_data = Self::read_u32(data, &mut pos)?;
+            for _ in 0..task_count {
+                Self::skip_task_entry(data, &mut pos)?;
+            }
+            data[task_start..pos].to_vec()
+        } else {
+            Vec::new()
+        };
+
         let header = SnapshotHeader {
             magic,
             version,
@@ -398,6 +460,7 @@ impl Snapshot {
             frame_count,
             stack_count,
             io_handle_count,
+            task_count,
         };
 
         Ok(Snapshot {
@@ -406,6 +469,8 @@ impl Snapshot {
             frames_data,
             stack_data,
             io_section,
+            task_tree: Vec::new(),
+            task_section,
             gc_to_pos: HashMap::new(),
         })
     }
@@ -490,6 +555,43 @@ impl Snapshot {
         }
         // position(u64) — always present, 0xFFFF_FFFF_FFFF_FFFF means None
         *pos = pos.checked_add(8).ok_or(SnapshotError::UnexpectedEof)?;
+        Ok(())
+    }
+
+    /// Skip past one task snapshot entry.
+    fn skip_task_entry(data: &[u8], pos: &mut usize) -> Result<(), SnapshotError> {
+        // id(u32)
+        *pos = pos.checked_add(4).ok_or(SnapshotError::UnexpectedEof)?;
+        // parent_flag(u8)
+        let parent_flag = Self::read_u8(data, pos)?;
+        if parent_flag == 1 {
+            *pos = pos.checked_add(4).ok_or(SnapshotError::UnexpectedEof)?;
+        }
+        // status_kind(u8)
+        let status_kind = Self::read_u8(data, pos)?;
+        if status_kind == 1 {
+            *pos = pos.checked_add(4).ok_or(SnapshotError::UnexpectedEof)?;
+        }
+        // children_count(u32) + children ids
+        let children_count = Self::read_u32(data, pos)? as usize;
+        *pos = pos
+            .checked_add(children_count * 4)
+            .ok_or(SnapshotError::UnexpectedEof)?;
+        // stack_count(u32) + values
+        let stack_count = Self::read_u32(data, pos)? as usize;
+        for _ in 0..stack_count {
+            Self::skip_value(data, pos)?;
+        }
+        // frame_count(u32) + frames
+        let frame_count = Self::read_u32(data, pos)? as usize;
+        for _ in 0..frame_count {
+            Self::skip_frame_entry(data, pos)?;
+        }
+        // io_handle_count(u32) + io entries
+        let io_count = Self::read_u32(data, pos)? as usize;
+        for _ in 0..io_count {
+            Self::skip_io_entry(data, pos)?;
+        }
         Ok(())
     }
 
@@ -611,6 +713,56 @@ impl Snapshot {
             buf.extend_from_slice(&pos.to_le_bytes());
         } else {
             buf.extend_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
+        }
+    }
+
+    /// Serialize a task snapshot entry (metadata + stack + frames + I/O).
+    fn serialize_task_snapshot(
+        buf: &mut Vec<u8>,
+        task: &crate::task::Task,
+        gc_to_pos: &HashMap<usize, u32>,
+        heap: &Heap,
+    ) {
+        use crate::task::TaskStatus;
+        Self::write_u32(buf, task.id.0 as u32);
+        // parent
+        if let Some(parent) = task.parent {
+            Self::write_u8(buf, 1);
+            Self::write_u32(buf, parent.0 as u32);
+        } else {
+            Self::write_u8(buf, 0);
+        }
+        // status
+        match &task.status {
+            TaskStatus::Yielded(pc) => {
+                Self::write_u8(buf, 1);
+                Self::write_u32(buf, *pc as u32);
+            }
+            TaskStatus::Completed => {
+                Self::write_u8(buf, 2);
+            }
+            TaskStatus::Running => unreachable!("Running tasks are filtered"),
+        }
+        // children
+        Self::write_u32(buf, task.children.len() as u32);
+        for child in &task.children {
+            Self::write_u32(buf, child.0 as u32);
+        }
+        // stack
+        Self::write_u32(buf, task.stack.len() as u32);
+        for val in &task.stack {
+            Self::write_value_ref(buf, val, gc_to_pos, heap);
+        }
+        // frames
+        Self::write_u32(buf, task.frames.len() as u32);
+        for frame in &task.frames {
+            Self::serialize_frame(buf, frame, gc_to_pos, heap);
+        }
+        // I/O handles
+        let io_count = task.io_handles.len() as u32;
+        Self::write_u32(buf, io_count);
+        for (&id, handle) in &task.io_handles {
+            Self::serialize_io_handle_snapshot(buf, id, handle);
         }
     }
 
@@ -1085,6 +1237,162 @@ impl Snapshot {
         vm.frames = frames;
         vm.stack = stack;
         vm.running = true;
+
+        Ok(())
+    }
+
+    /// Rebuild the VM task registry from the serialised task section.
+    ///
+    /// Must be called after `restore_into` so the heap is already populated.
+    /// The task section stores heap positions (not Gc indices), so we
+    /// rebuild `pos_to_gc` from `heap_data` to translate them.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SnapshotError` if the task section data is malformed.
+    #[allow(clippy::too_many_lines)]
+    pub fn restore_task_tree(&self, vm: &mut VM) -> Result<(), SnapshotError> {
+        if self.header.task_count == 0 {
+            return Ok(());
+        }
+
+        // Rebuild pos→Gc mapping from heap_data.
+        // Since restore_into allocates sequentially into a fresh heap,
+        // the mapping is identity: pos_to_gc[i] = i.
+        let mut pos_to_gc: HashMap<u32, usize> = HashMap::new();
+        let mut hscan: usize = 0;
+        for pos_idx in 0..self.header.heap_count {
+            let tag = Self::read_u8(&self.heap_data, &mut hscan)?;
+            match tag {
+                TAG_STRING => {
+                    let len = Self::read_u32(&self.heap_data, &mut hscan)? as usize;
+                    hscan = hscan.checked_add(len).ok_or(SnapshotError::UnexpectedEof)?;
+                }
+                TAG_LIST => {
+                    let count = Self::read_u32(&self.heap_data, &mut hscan)? as usize;
+                    for _ in 0..count {
+                        Self::skip_value(&self.heap_data, &mut hscan)?;
+                    }
+                }
+                _ => return Err(SnapshotError::UnknownObjectTag(tag)),
+            }
+            pos_to_gc.insert(pos_idx, pos_idx as usize);
+        }
+
+        // Parse task section.
+        let mut tpos: usize = 0;
+        let tcount = Self::read_u32(&self.task_section, &mut tpos)?;
+        let current_id = vm.current_task_id;
+
+        for _ in 0..tcount {
+            let id = Self::read_u32(&self.task_section, &mut tpos)?;
+            let task_id = crate::task::TaskId(u64::from(id));
+
+            let parent_flag = Self::read_u8(&self.task_section, &mut tpos)?;
+            let parent = if parent_flag == 1 {
+                Some(crate::task::TaskId(u64::from(Self::read_u32(
+                    &self.task_section,
+                    &mut tpos,
+                )?)))
+            } else {
+                None
+            };
+
+            let status_kind = Self::read_u8(&self.task_section, &mut tpos)?;
+            let status = match status_kind {
+                1 => {
+                    let pc = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                    crate::task::TaskStatus::Yielded(pc)
+                }
+                _ => crate::task::TaskStatus::Completed,
+            };
+
+            let children_count = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+            let mut children = Vec::with_capacity(children_count);
+            for _ in 0..children_count {
+                children.push(crate::task::TaskId(u64::from(Self::read_u32(
+                    &self.task_section,
+                    &mut tpos,
+                )?)));
+            }
+
+            // Skip the current task — its state comes from restore_into.
+            if task_id == current_id {
+                // Skip stack, frames, I/O sections for the current task.
+                let scount = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                for _ in 0..scount {
+                    Self::skip_value(&self.task_section, &mut tpos)?;
+                }
+                let fcount = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                for _ in 0..fcount {
+                    Self::skip_frame_entry(&self.task_section, &mut tpos)?;
+                }
+                let io_count = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                for _ in 0..io_count {
+                    Self::skip_io_entry(&self.task_section, &mut tpos)?;
+                }
+                // Update the current task's children list in the registry.
+                if let Some(task) = vm.task_registry.get_mut(&current_id) {
+                    task.children = children;
+                    task.status = status;
+                }
+                continue;
+            }
+
+            // Restore non-current tasks into the registry.
+            let mut task = crate::task::Task::new(task_id, parent);
+            task.children = children;
+            task.status = status;
+
+            // Restore stack.
+            let scount = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+            for _ in 0..scount {
+                task.stack.push(Self::read_value_ref(
+                    &self.task_section,
+                    &mut tpos,
+                    &pos_to_gc,
+                    &mut vm.heap,
+                )?);
+            }
+
+            // Restore frames.
+            let fcount = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+            for _ in 0..fcount {
+                let function = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                let ip = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                let locals_count = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+                let mut locals = Vec::with_capacity(locals_count);
+                for _ in 0..locals_count {
+                    locals.push(Self::read_value_ref(
+                        &self.task_section,
+                        &mut tpos,
+                        &pos_to_gc,
+                        &mut vm.heap,
+                    )?);
+                }
+                let mut frame = crate::vm::CallFrame::new(function, locals);
+                frame.ip = ip;
+                task.frames.push(frame);
+            }
+
+            // Restore I/O handles.
+            let io_count = Self::read_u32(&self.task_section, &mut tpos)? as usize;
+            for _ in 0..io_count {
+                let snap = Self::deserialize_io_handle_snapshot(&self.task_section, &mut tpos)?;
+                let hid = crate::io::HandleId(snap.id);
+                let (handle, _status) = Self::reconnect_handle(
+                    &snap,
+                    match snap.strategy {
+                        0 => crate::io::IoStrategy::Replay,
+                        1 => crate::io::IoStrategy::Seek,
+                        _ => crate::io::IoStrategy::Cached,
+                    },
+                );
+                task.io_handles.insert(hid, handle);
+            }
+
+            vm.task_registry.insert(task_id, task);
+        }
 
         Ok(())
     }

@@ -53,7 +53,7 @@ fn v2_snapshot_with_io_roundtrip() {
     });
 
     let snap = vm.create_snapshot();
-    assert_eq!(snap.header.version, 2);
+    assert_eq!(snap.header.version, 3);
     assert_eq!(snap.header.io_handle_count, 2);
 
     let tmp = "/tmp/pausible_v2_io_roundtrip.bin";

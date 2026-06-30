@@ -42,6 +42,8 @@
 
 ### 4.5 Resume 与任务树重建
 
+> **状态：已完成。**
+
 - 从 `task_tree` 反序列化所有 `TaskSnapshot`，重建 `Task` 对象
 - 恢复父子关系（先恢复所有任务 ID，再建立 parent/children 链接）
 - 找到 `Yielded(pc)` 状态的任务，将其设置为 `current_task_id`
