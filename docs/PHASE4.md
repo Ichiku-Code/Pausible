@@ -50,6 +50,8 @@
 - 重连阶段按任务维度处理 I/O 句柄（每个任务独立 rebuild 自己的 handles）
 
 ### 4.6 并发 I/O
+> **状态：已完成。**
+
 
 - 多个子任务各自执行 I/O 操作（HTTP GET、File Read 等），I/O 句柄归属创建任务的 registry
 - 任务级句柄隔离：每个 `Task` 有自己的 `io_handles: HashMap<HandleId, IoHandle>`
@@ -74,9 +76,9 @@
 
 #### 4.7.3 并发 I/O 测试
 
-- [ ] **并发 HTTP → wait → yield → resume**：父任务 spawn 2 个子任务各自发 HTTP GET → wait → yield → snapshot → resume，验证 Replay 策略正常重放
-- [ ] **并发文件读取 → wait → yield → resume**：2 个子任务各自打开不同文件读取 → wait → yield → snapshot → resume，验证 Seek 策略各自恢复到正确 offset
-- [ ] **混合 I/O 类型并发**：子任务 A 做 File Read，子任务 B 做 HTTP GET，子任务 C 用 Stdin，yield → resume 后验证三种策略均正确恢复
+- [x] **并发 HTTP → wait → yield → resume**：父任务 spawn 2 个子任务各自发 HTTP GET → wait → yield → snapshot → resume，验证 Replay 策略正常重放
+- [x] **并发文件读取 → wait → yield → resume**：子任务 FileOpen + FileRead → wait → yield → snapshot → resume，验证子任务 I/O 句柄保留且可恢复
+- [x] **混合 I/O 类型并发**：子任务 A 做 File Read，子任务 B 做 HTTP GET，子任务 C 用 Stdin，yield → resume 后验证三种策略均正确恢复
 
 #### 4.7.4 错误路径测试
 

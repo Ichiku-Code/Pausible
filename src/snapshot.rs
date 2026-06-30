@@ -1251,10 +1251,16 @@ impl Snapshot {
     ///
     /// Returns `SnapshotError` if the task section data is malformed.
     #[allow(clippy::too_many_lines)]
-    pub fn restore_task_tree(&self, vm: &mut VM) -> Result<(), SnapshotError> {
+    pub fn restore_task_tree(&self, vm: &mut VM) -> Result<ReconnectReport, SnapshotError> {
         if self.header.task_count == 0 {
-            return Ok(());
+            return Ok(ReconnectReport {
+                entries: Vec::new(),
+            });
         }
+
+        let mut report = ReconnectReport {
+            entries: Vec::new(),
+        };
 
         // Rebuild pos→Gc mapping from heap_data.
         // Since restore_into allocates sequentially into a fresh heap,
@@ -1380,7 +1386,7 @@ impl Snapshot {
             for _ in 0..io_count {
                 let snap = Self::deserialize_io_handle_snapshot(&self.task_section, &mut tpos)?;
                 let hid = crate::io::HandleId(snap.id);
-                let (handle, _status) = Self::reconnect_handle(
+                let (handle, status) = Self::reconnect_handle(
                     &snap,
                     match snap.strategy {
                         0 => crate::io::IoStrategy::Replay,
@@ -1388,13 +1394,14 @@ impl Snapshot {
                         _ => crate::io::IoStrategy::Cached,
                     },
                 );
+                report.entries.push((hid, status));
                 task.io_handles.insert(hid, handle);
             }
 
             vm.task_registry.insert(task_id, task);
         }
 
-        Ok(())
+        Ok(report)
     }
 
     // -- internal serialization helpers --

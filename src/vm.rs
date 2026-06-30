@@ -453,9 +453,16 @@ impl VM {
     pub fn resume(&mut self, snap: &crate::snapshot::Snapshot) -> Result<(), ResumeError> {
         self.restore_snapshot(snap)
             .map_err(|e| ResumeError::Snapshot(e.to_string()))?;
-        snap.restore_task_tree(self)
+        let mut task_report = snap
+            .restore_task_tree(self)
             .map_err(|e| ResumeError::Snapshot(e.to_string()))?;
-        let report = snap.restore_io_handles(self);
+        let global_report = snap.restore_io_handles(self);
+        // Merge per-task I/O report with global I/O report.
+        let mut all_entries = std::mem::take(&mut task_report.entries);
+        all_entries.extend(global_report.entries);
+        let report = crate::snapshot::ReconnectReport {
+            entries: all_entries,
+        };
         if report.has_failures() {
             let failed: Vec<String> = report
                 .entries
@@ -810,6 +817,10 @@ impl VM {
                     if let Some(child) = self.task_registry.get_mut(&child_id) {
                         child.status = TaskStatus::Completed;
                     }
+
+                    // Persist child state back to registry so snapshot
+                    // capture can find its I/O handles.
+                    self.save_current_task();
                 }
 
                 // Restore parent state and push collected return values.
